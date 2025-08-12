@@ -32,10 +32,10 @@ logger = app.logger
 SCANS: Dict[str, Dict[str, Any]] = {}
 
 # Scan budgets to keep response under ~15s on free RPC
-PAGE_LIMIT = int(os.environ.get("SCAN_PAGE_LIMIT", "200"))  # signatures per page
-MAX_PAGES = int(os.environ.get("SCAN_MAX_PAGES", "10"))    # hard cap on pages
-TIME_BUDGET_SEC = float(os.environ.get("SCAN_TIME_BUDGET_SEC", "12"))
-MAX_ANALYZE_TX = int(os.environ.get("SCAN_MAX_ANALYZE_TX", "220"))
+PAGE_LIMIT = int(os.environ.get("SCAN_PAGE_LIMIT", "100"))  # signatures per page
+MAX_PAGES = int(os.environ.get("SCAN_MAX_PAGES", "5"))     # hard cap on pages
+TIME_BUDGET_SEC = float(os.environ.get("SCAN_TIME_BUDGET_SEC", "10"))
+MAX_ANALYZE_TX = int(os.environ.get("SCAN_MAX_ANALYZE_TX", "120"))
 
 
 def get_solana_client() -> Client:
