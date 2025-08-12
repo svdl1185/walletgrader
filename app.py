@@ -11,6 +11,7 @@ import logging
 import requests
 from bs4 import BeautifulSoup  # type: ignore
 from urllib.parse import unquote
+from email.utils import parsedate_to_datetime
 
 try:
     from solana.rpc.api import Client  # type: ignore
@@ -51,6 +52,19 @@ YAHOO_STOCKS: Set[str] = {
 YAHOO_CRYPTO: Set[str] = {
     "BTC", "ETH", "LINK", "SOL", "BNB", "XRP", "ADA", "DOGE", "LTC", "BCH", "AVAX",
     "MATIC", "DOT", "ATOM", "OP", "ARB", "NEAR", "APT", "SUI", "SEI", "TIA",
+}
+
+# Map common asset/company names in plain text to symbols so we catch tweets
+# that say e.g. "nvidia" or "amd" without a $cashtag.
+KNOWN_NAME_TO_SYMBOL: Dict[str, str] = {
+    "nvidia": "NVDA",
+    "nvda": "NVDA",
+    "advanced micro devices": "AMD",
+    "amd": "AMD",
+    "bitcoin": "BTC",
+    "btc": "BTC",
+    "chainlink": "LINK",
+    "link": "LINK",
 }
 
 def _build_chart_url(symbol: str, info: Dict[str, Any] | None, yahoo_long: Dict[str, float] | None) -> str | None:
@@ -1512,6 +1526,18 @@ def _extract_coin_mentions_per_tweet(tweets: List[Dict[str, Any]]) -> List[Dict[
                 "tweet_id": tid,
                 "source": "birdeye",
             })
+        # Name-based mapping to tickers (e.g., "nvidia" -> NVDA)
+        txt_lower = text.lower()
+        for name, sym in KNOWN_NAME_TO_SYMBOL.items():
+            if name in txt_lower:
+                events.append({
+                    "kind": "symbol",
+                    "id": sym,
+                    "text": text,
+                    "created_at": ts,
+                    "tweet_id": tid,
+                    "source": "name-map",
+                })
     return events
 
 
@@ -1567,7 +1593,14 @@ def _hours_since(dt_iso_str: str | None) -> float | None:
         dt = datetime.fromisoformat(dt_iso_str.replace("Z", "+00:00"))
         return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0)
     except Exception:
-        return None
+        # Try RFC822 (e.g., Nitter RSS pubDate)
+        try:
+            dt = parsedate_to_datetime(dt_iso_str)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0)
+        except Exception:
+            return None
 
 
 def _approx_return_since_call_using_dex(change: Dict[str, float], hours_since: float | None) -> float | None:
@@ -1814,6 +1847,16 @@ def grade_twitter(handle_or_url: str) -> Dict[str, Any]:
             if yahoo_long and ev.get("created_at"):
                 # Prefer Yahoo long horizons for non-DEX assets
                 longterm = yahoo_long
+                # Use Yahoo to approximate since-call change when we have no DEX info
+                if hs is not None:
+                    if hs <= 1.2 and "1h" in yahoo_long:
+                        approx = yahoo_long.get("1h")
+                    elif hs <= 26 and "24h" in yahoo_long:
+                        approx = yahoo_long.get("24h")
+                    elif hs <= 7*24 and "7d" in yahoo_long:
+                        approx = yahoo_long.get("7d")
+                    elif "30d" in yahoo_long:
+                        approx = yahoo_long.get("30d")
             per_call.append({
                 "created_at": ev.get("created_at"),
                 "source": ev.get("source"),
