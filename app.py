@@ -1374,6 +1374,7 @@ def _extract_coin_mentions_per_tweet(tweets: List[Dict[str, Any]]) -> List[Dict[
 
 def _dexscreener_lookup(ident: str, kind: str) -> Dict[str, Any] | None:
     try:
+        ident_upper = (ident or "").upper()
         if kind == "address":
             r = requests.get(DEXSCREENER_TOKEN + ident, timeout=10)
         else:
@@ -1386,11 +1387,25 @@ def _dexscreener_lookup(ident: str, kind: str) -> Dict[str, Any] | None:
         pairs = data.get("pairs") or data.get("pairsByDexId") or data.get("pairs")
         if not pairs:
             return None
-        # Prefer Solana and highest liquidity
+        # Filter strictly to Solana
+        pairs = [p for p in pairs if p.get("chainId") in ("solana", "SOLANA", "solana-mainnet")]
+        if not pairs:
+            return None
+        # If looking up by symbol, require exact symbol match to avoid false matches (e.g., $AMD stock)
+        if kind != "address":
+            pairs_exact = []
+            for p in pairs:
+                sym = ((p.get("baseToken") or {}).get("symbol") or p.get("baseTokenSymbol") or "").upper()
+                if sym == ident_upper:
+                    pairs_exact.append(p)
+            if pairs_exact:
+                pairs = pairs_exact
+            else:
+                return None
+        # Prefer highest liquidity among remaining
         def _rank(p):
-            chain_ok = 1 if (p.get("chainId") in ("solana", "SOLANA", "solana-mainnet")) else 0
-            liq = float(p.get("liquidity", {}).get("usd", 0) or p.get("liquidity", 0) or 0)
-            return (chain_ok, liq)
+            liq = float((p.get("liquidity", {}) or {}).get("usd") or p.get("liquidity") or 0)
+            return liq
         best = max(pairs, key=_rank)
         change = best.get("priceChange", {}) or {}
         return {
