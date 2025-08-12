@@ -2,9 +2,7 @@ import os
 import math
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Set, Tuple
-import threading
 import time
-import uuid
 import random
 
 from flask import Flask, render_template, request, jsonify
@@ -28,17 +26,12 @@ app = Flask(__name__)
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = app.logger
 
-# In-memory deep scan jobs store (ephemeral)
-SCANS: Dict[str, Dict[str, Any]] = {}
-
-# Scan budgets to keep response under ~15s on free RPC
-PAGE_LIMIT = int(os.environ.get("SCAN_PAGE_LIMIT", "100"))  # signatures per page
-MAX_PAGES = int(os.environ.get("SCAN_MAX_PAGES", "5"))     # hard cap on pages
-TIME_BUDGET_SEC = float(os.environ.get("SCAN_TIME_BUDGET_SEC", "10"))
-MAX_ANALYZE_TX = int(os.environ.get("SCAN_MAX_ANALYZE_TX", "120"))
-
-# Quick scan aggressiveness (number of transactions to fully fetch)
-QUICK_SAMPLE_TX = int(os.environ.get("QUICK_SAMPLE_TX", "60"))
+# Single-scan tuning knobs (set via env for your RPC tier)
+# Recommended for paid RPC (raise gradually): PAGE_LIMIT 500–1000, MAX_PAGES 2–5, MAX_ANALYZE_TX 150–400
+PAGE_LIMIT = int(os.environ.get("SCAN_PAGE_LIMIT", "300"))  # signatures per page
+MAX_PAGES = int(os.environ.get("SCAN_MAX_PAGES", "3"))     # pages of signatures
+TIME_BUDGET_SEC = float(os.environ.get("SCAN_TIME_BUDGET_SEC", "12"))
+MAX_ANALYZE_TX = int(os.environ.get("SCAN_MAX_ANALYZE_TX", "180"))
 
 
 def get_solana_client() -> Client:
@@ -96,23 +89,55 @@ def grade_wallet(address: str) -> Dict[str, Any]:
         balance_lamports = 0
     sol_balance = balance_lamports / 1_000_000_000
 
-    # Signatures (recent history)
-    signatures_resp = client.get_signatures_for_address(public_key, limit=200)
+    # Unified scan: paginate signatures under a time/size budget
     signatures_json: List[Dict[str, Any]] = []
+    before_sig: str | None = None
+    started = time.time()
+
+    def call_with_retries(fn, *args, **kwargs):
+        attempts = 0
+        delay = 0.4
+        while True:
+            try:
+                return fn(*args, **kwargs)
+            except Exception:
+                attempts += 1
+                if attempts >= 5:
+                    raise
+                sleep_for = delay * (2 ** (attempts - 1)) + random.uniform(0, 0.2)
+                time.sleep(sleep_for)
+
     try:
-        if hasattr(signatures_resp, "value"):
-            signatures_json = [
-                {
-                    "signature": getattr(s, "signature", None),
-                    "blockTime": getattr(s, "block_time", None) or getattr(s, "blockTime", None),
-                }
-                for s in getattr(signatures_resp, "value", [])
-            ]
-        else:
-            signatures_json = signatures_resp.get("result", []) if isinstance(signatures_resp, dict) else []
+        for _ in range(MAX_PAGES):
+            if (time.time() - started) > TIME_BUDGET_SEC:
+                break
+            resp = call_with_retries(
+                client.get_signatures_for_address,
+                public_key,
+                before=before_sig,
+                limit=PAGE_LIMIT,
+            )
+            batch: List[Any] = []
+            if hasattr(resp, "value"):
+                batch = getattr(resp, "value", [])
+                batch = [
+                    {
+                        "signature": getattr(x, "signature", None),
+                        "blockTime": getattr(x, "block_time", None) or getattr(x, "blockTime", None),
+                    }
+                    for x in batch
+                ]
+            elif isinstance(resp, dict):
+                batch = resp.get("result", []) or []
+            if not batch:
+                break
+            signatures_json.extend(batch)
+            before_sig = batch[-1].get("signature")
+            if len(signatures_json) >= MAX_ANALYZE_TX:
+                break
     except Exception:
         logger.exception("grade_wallet:signatures_fetch_failed address=%s", address)
-        signatures_json = []
+        # keep whatever we collected so far
     tx_count = len(signatures_json)
 
     # Estimate account age from oldest signature timestamp (if present)
@@ -130,15 +155,14 @@ def grade_wallet(address: str) -> Dict[str, Any]:
     if first_tx_time is not None:
         days_old = max(0, (datetime.now(timezone.utc) - first_tx_time).days)
 
-    # Inspect a sample of transactions to infer basic trading cadence features
-    # Sample a bounded number of transactions to fully fetch
-    sample_sigs: List[str] = [s.get("signature") for s in signatures_json[:QUICK_SAMPLE_TX] if s.get("signature")]
+    # Analyze up to MAX_ANALYZE_TX transactions collected above
+    sample_sigs: List[str] = [s.get("signature") for s in signatures_json if s.get("signature")]
     sampled_tx: List[Tuple[int, Set[str]]] = []  # list of (timestamp, set(program_ids))
     trade_deltas: List[Tuple[int, float]] = []  # (timestamp, net SOL delta excluding fee)
 
     for sig in sample_sigs:
         try:
-            tx_resp = client.get_transaction(sig, max_supported_transaction_version=0)
+            tx_resp = call_with_retries(client.get_transaction, sig, max_supported_transaction_version=0)
             tx_json: Dict[str, Any] | None = None
             if hasattr(tx_resp, "to_json"):
                 import json as _json
@@ -202,6 +226,8 @@ def grade_wallet(address: str) -> Dict[str, Any]:
         except Exception:
             logger.exception("grade_wallet:tx_fetch_failed sig=%s address=%s", sig, address)
             continue
+        if (time.time() - started) > TIME_BUDGET_SEC:
+            break
 
     # Helper: compute median of a list of numbers
     def _median(nums: List[float]) -> float:
@@ -774,33 +800,7 @@ def _run_deep_scan(scan_id: str, address: str) -> None:
         SCANS[scan_id].update({"status": "error", "error": str(e)})
 
 
-@app.post("/deep-scan")
-def deep_scan_start():
-    data = request.get_json(silent=True) or {}
-    address = (data.get("address") or request.form.get("address") or "").strip()
-    if not address:
-        return jsonify({"error": "Please enter a Solana wallet address."}), 400
-    scan_id = uuid.uuid4().hex
-    t = threading.Thread(target=_run_deep_scan, args=(scan_id, address), daemon=True)
-    t.start()
-    logger.info("deep_scan:accepted scan_id=%s address=%s", scan_id, address)
-    return jsonify({"scan_id": scan_id}), 202
-
-
-@app.get("/deep-scan/<scan_id>")
-def deep_scan_status(scan_id: str):
-    job = SCANS.get(scan_id)
-    if not job:
-        return jsonify({"error": "Scan not found."}), 404
-    logger.info("deep_scan:status scan_id=%s status=%s processed=%s total=%s", scan_id, job.get("status"), job.get("processed"), job.get("total"))
-    return jsonify({
-        "status": job.get("status"),
-        "progress": job.get("progress"),
-        "processed": job.get("processed"),
-        "total": job.get("total"),
-        "error": job.get("error"),
-        "result": job.get("result"),
-    })
+# Deep-scan endpoints removed; unified /grade scan handles both pagination and analysis under a time budget
 
 
 @app.route("/", methods=["GET", "POST"])
