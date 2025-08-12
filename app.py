@@ -236,6 +236,8 @@ def grade_wallet(address: str) -> Dict[str, Any]:
         if (time.time() - started) > TIME_BUDGET_SEC:
             break
 
+    # Profit-first analysis and scoring
+
     # Helper: compute median of a list of numbers
     def _median(nums: List[float]) -> float:
         if not nums:
@@ -247,167 +249,172 @@ def grade_wallet(address: str) -> Dict[str, Any]:
             return float(nums_sorted[mid])
         return float((nums_sorted[mid - 1] + nums_sorted[mid]) / 2.0)
 
-    # Build inter-transaction timing and simple churn features
-    # Use signatures list for broader time coverage
-    times_desc: List[int] = [s.get("blockTime") for s in signatures_json if s.get("blockTime")]
-    times_asc: List[int] = sorted(times_desc)
-    inter_tx_hours: List[float] = []
-    for i in range(1, len(times_asc)):
-        dt_sec = max(0, times_asc[i] - times_asc[i - 1])
-        inter_tx_hours.append(dt_sec / 3600.0)
-    median_inter_tx_hours = _median(inter_tx_hours)
-
-    # Repeat sequences: adjacent sampled tx that share any program within 6 hours window
-    sampled_tx_sorted = sorted(sampled_tx, key=lambda t: t[0])
-    repeat_sequences_6h = 0
-    for i in range(1, len(sampled_tx_sorted)):
-        t_prev, progs_prev = sampled_tx_sorted[i - 1]
-        t_curr, progs_curr = sampled_tx_sorted[i]
-        if (t_curr - t_prev) <= 6 * 3600 and (progs_prev & progs_curr):
-            repeat_sequences_6h += 1
-
-    # Derive trade success heuristics from SOL balance deltas
+    # Build realized roundtrips from SOL deltas using a simple cycle model
     trade_deltas_sorted = sorted(trade_deltas, key=lambda t: t[0])
     min_move_sol = 0.01  # ignore tiny moves
-    last_outflow_time: int | None = None
-    last_outflow_amt: float = 0.0
-    successful_roundtrips = 0
-    big_profit_trades = 0
-    best_profit_sol = 0.0
-    total_profit_sol = 0.0
-    positive_tx = 0
-    negative_tx = 0
+
+    class _Cycle:
+        def __init__(self, start_ts: int, first_outflow: float) -> None:
+            self.start_ts = int(start_ts)
+            self.outflow = float(first_outflow)  # total SOL spent (cost basis)
+            self.inflow = 0.0  # total SOL received
+
+    realized: List[Dict[str, float | int]] = []
+    open_cycle: _Cycle | None = None
+
     for ts, dsol in trade_deltas_sorted:
-        if dsol > min_move_sol:
-            positive_tx += 1
-            if last_outflow_time is not None and (ts - last_outflow_time) <= 12 * 3600 and dsol >= 1.05 * last_outflow_amt:
-                profit = dsol - last_outflow_amt
-                successful_roundtrips += 1
-                total_profit_sol += profit
-                if profit > best_profit_sol:
-                    best_profit_sol = profit
-                if profit >= 1.0:
-                    big_profit_trades += 1
-                last_outflow_time = None
-                last_outflow_amt = 0.0
-        elif dsol < -min_move_sol:
-            negative_tx += 1
-            last_outflow_time = ts
-            last_outflow_amt = abs(dsol)
-        else:
-            # ignore noise
-            pass
+        if dsol < -min_move_sol:
+            # Spend SOL (likely buy)
+            if open_cycle is None:
+                open_cycle = _Cycle(ts, abs(dsol))
+            else:
+                open_cycle.outflow += abs(dsol)
+        elif dsol > min_move_sol:
+            # Receive SOL (likely sell)
+            if open_cycle is None:
+                # Positive inflow without prior spend: ignore for realized PnL (could be deposit/airdrop)
+                continue
+            remaining_needed = max(0.0, open_cycle.outflow - open_cycle.inflow)
+            consume = min(float(dsol), remaining_needed)
+            open_cycle.inflow += consume
+            # If cycle fully closed (recovered at least cost), realize PnL
+            if open_cycle.inflow + 1e-9 >= open_cycle.outflow:
+                outflow = open_cycle.outflow
+                inflow = open_cycle.inflow
+                pnl = inflow - outflow
+                roi = (inflow / outflow - 1.0) if outflow > 0 else 0.0
+                hold_sec = max(0, int(ts - open_cycle.start_ts))
+                realized.append({
+                    "outflow_sol": round(outflow, 9),
+                    "inflow_sol": round(inflow, 9),
+                    "pnl_sol": round(pnl, 9),
+                    "roi": round(roi, 6),
+                    "hold_seconds": hold_sec,
+                })
+                # Remainder of inflow (if any) is ignored; start fresh
+                open_cycle = None
+        # else small noise ignored
 
-    win_rate = 0.0
-    if (positive_tx + negative_tx) > 0:
-        win_rate = round(positive_tx / float(positive_tx + negative_tx), 4)
+    # Aggregate metrics
+    wins = [t for t in realized if t["pnl_sol"] > 0]
+    losses = [t for t in realized if t["pnl_sol"] < 0]
+    realized_trades = len(realized)
+    wins_count = len(wins)
+    losses_count = len(losses)
+    total_profit_sol = float(sum(t["pnl_sol"] for t in wins)) if wins else 0.0
+    total_loss_sol = float(sum(t["pnl_sol"] for t in losses)) if losses else 0.0  # negative
+    net_profit_sol = total_profit_sol + total_loss_sol
+    win_rate = round(wins_count / realized_trades, 4) if realized_trades > 0 else 0.0
+    profit_factor = (total_profit_sol / abs(total_loss_sol)) if total_loss_sol < 0 else (99.0 if total_profit_sol > 0 else 0.0)
 
-    # New memecoin-oriented scoring (0-100) with profits focus
+    best_trade_profit_sol = max([t["pnl_sol"] for t in wins], default=0.0)
+    worst_trade_loss_sol = min([t["pnl_sol"] for t in losses], default=0.0)
+    best_trade_roi = max([t["roi"] for t in realized], default=0.0)
+    worst_trade_roi = min([t["roi"] for t in realized], default=0.0)
+
+    # Quick wins by hold time thresholds (applied to winning trades only)
+    win_hold_minutes = [t["hold_seconds"] / 60.0 for t in wins]
+    median_win_hold_minutes = _median(win_hold_minutes)
+    quick_30m = sum(1 for t in wins if t["hold_seconds"] <= 30 * 60)
+    quick_2h = sum(1 for t in wins if 30 * 60 < t["hold_seconds"] <= 2 * 3600)
+    quick_6h = sum(1 for t in wins if 2 * 3600 < t["hold_seconds"] <= 6 * 3600)
+
+    # Big % profit counts
+    roi_50 = sum(1 for t in realized if t["roi"] >= 0.5)
+    roi_100 = sum(1 for t in realized if t["roi"] >= 1.0)
+    roi_200 = sum(1 for t in realized if t["roi"] >= 2.0)
+
+    # Tail loss count (very bad % losses)
+    tail_loss_count = sum(1 for t in losses if t["roi"] <= -0.6)
+
+    # Score assembly (0-100), profit-first
     score = 0
 
-    # Profitable roundtrips (0-50)
-    if successful_roundtrips >= 8:
-        score += 50
-    elif successful_roundtrips >= 5:
-        score += 40
-    elif successful_roundtrips >= 3:
-        score += 30
-    elif successful_roundtrips >= 2:
+    # Absolute profit size (0-35)
+    if total_profit_sol >= 10:
+        score += 35
+    elif total_profit_sol >= 5:
+        score += 28
+    elif total_profit_sol >= 2:
         score += 20
-    elif successful_roundtrips >= 1:
-        score += 10
-
-    # Profit size bonus (0-20)
-    if best_profit_sol >= 5 or total_profit_sol >= 10:
-        score += 20
-    elif best_profit_sol >= 2 or total_profit_sol >= 5:
-        score += 15
-    elif best_profit_sol >= 1 or total_profit_sol >= 2:
-        score += 10
-    elif best_profit_sol >= 0.25 or total_profit_sol >= 0.5:
-        score += 5
-
-    # Balance (0-5) — very light
-    if sol_balance >= 100:
-        score += 5
-    elif sol_balance >= 10:
-        score += 4
-    elif sol_balance >= 1:
-        score += 3
-    elif sol_balance >= 0.1:
-        score += 2
-    elif sol_balance > 0:
-        score += 1
-
-    # Activity shape (0-10) — moderate activity best
-    if tx_count == 0:
-        activity_score = 0
-    elif tx_count <= 5:
-        activity_score = 2
-    elif tx_count <= 15:
-        activity_score = 6
-    elif tx_count <= 60:
-        activity_score = 10
-    elif tx_count <= 120:
-        activity_score = 7
-    else:
-        activity_score = 4
-    score += activity_score
-
-    # Account age (0-5) — reduced weight
-    if days_old >= 365:
-        score += 5
-    elif days_old >= 180:
-        score += 4
-    elif days_old >= 90:
-        score += 3
-    elif days_old >= 30:
-        score += 2
-
-    # Holding quality (0-20) — reward longer median time between txs
-    if median_inter_tx_hours >= 72:
-        score += 20
-    elif median_inter_tx_hours >= 36:
-        score += 16
-    elif median_inter_tx_hours >= 12:
-        score += 10
-    elif median_inter_tx_hours >= 4:
+    elif total_profit_sol >= 1:
+        score += 12
+    elif total_profit_sol >= 0.25:
         score += 6
-    elif median_inter_tx_hours >= 1:
-        score += 2
 
-    # Churn penalty (up to -15) — frequent in/out and very short holds suggest "jeet" behavior
-    if repeat_sequences_6h >= 10:
-        score -= 10
-    elif repeat_sequences_6h >= 6:
+    # Profit quality (0-20): win rate + profit factor
+    quality_pts = 0
+    if realized_trades >= 3:
+        if win_rate >= 0.75:
+            quality_pts += 14
+        elif win_rate >= 0.65:
+            quality_pts += 10
+        elif win_rate >= 0.55:
+            quality_pts += 6
+        if profit_factor >= 3.0:
+            quality_pts += 6
+        elif profit_factor >= 2.0:
+            quality_pts += 4
+        elif profit_factor >= 1.5:
+            quality_pts += 2
+    score += min(20, quality_pts)
+
+    # Quick profitable holds bonus (0-10)
+    quick_pts = 3 * quick_30m + 2 * quick_2h + 1 * quick_6h
+    score += min(10, quick_pts)
+
+    # Big percentage profit bonus (0-15)
+    pct_pts = 2 * roi_200 + 3 * roi_100 + 1 * roi_50
+    score += min(15, pct_pts)
+
+    # Big absolute win bonus (0-10)
+    if best_trade_profit_sol >= 5:
+        score += 10
+    elif best_trade_profit_sol >= 2:
+        score += 7
+    elif best_trade_profit_sol >= 1:
+        score += 5
+    elif best_trade_profit_sol >= 0.5:
+        score += 3
+
+    # Loss magnitude penalty (up to -25)
+    loss_mag = abs(total_loss_sol)
+    if loss_mag >= 10:
+        score -= 25
+    elif loss_mag >= 5:
+        score -= 18
+    elif loss_mag >= 2:
+        score -= 12
+    elif loss_mag >= 1:
         score -= 7
-    elif repeat_sequences_6h >= 3:
-        score -= 4
 
-    if median_inter_tx_hours > 0 and median_inter_tx_hours < 1:
-        score -= 5
+    # Tail loss penalty (up to -10)
+    tail_penalty = 2 * tail_loss_count
+    if abs(worst_trade_loss_sol) >= 2.0:
+        tail_penalty += 2
+    score -= min(10, tail_penalty)
 
-    score = max(1, min(100, int(score)))
+    score = max(1, min(100, int(round(score))))
 
     label = human_label_from_score(score)
 
-    # Derive simple profiles for display
-    if median_inter_tx_hours >= 36:
-        hold_profile = "long holds"
-    elif median_inter_tx_hours >= 12:
-        hold_profile = "swing holds"
-    elif median_inter_tx_hours >= 1:
-        hold_profile = "short holds"
-    elif median_inter_tx_hours >= 0.25:
-        hold_profile = "scalping"
+    # Profiles for display
+    if median_win_hold_minutes <= 30 and wins_count > 0:
+        hold_profile = "sniper scalper"
+    elif median_win_hold_minutes <= 120 and wins_count > 0:
+        hold_profile = "scalper"
+    elif median_win_hold_minutes <= 360 and wins_count > 0:
+        hold_profile = "quick swing"
+    elif wins_count > 0:
+        hold_profile = "swing/position"
     else:
-        hold_profile = "high-speed trader"
+        hold_profile = "no realized wins"
 
-    if tx_count <= 15:
+    if realized_trades <= 3:
         activity_profile = "low"
-    elif tx_count <= 60:
+    elif realized_trades <= 10:
         activity_profile = "moderate"
-    elif tx_count <= 120:
+    elif realized_trades <= 30:
         activity_profile = "high"
     else:
         activity_profile = "overactive"
@@ -420,15 +427,29 @@ def grade_wallet(address: str) -> Dict[str, Any]:
             "sol_balance": sol_balance,
             "recent_tx_count": tx_count,
             "account_age_days": days_old,
-            "median_inter_tx_hours": round(median_inter_tx_hours, 2),
-            "repeat_sequences_6h": repeat_sequences_6h,
             "hold_profile": hold_profile,
             "activity_profile": activity_profile,
-            "successful_trades": successful_roundtrips,
-            "big_profit_trades": big_profit_trades,
-            "best_profit_sol": round(best_profit_sol, 6),
-            "total_profit_sol": round(total_profit_sol, 6),
+            # Realized performance
+            "realized_trades": realized_trades,
+            "wins": wins_count,
+            "losses": losses_count,
             "win_rate": win_rate,
+            "profit_factor": round(profit_factor, 4) if isinstance(profit_factor, float) else profit_factor,
+            "total_profit_sol": round(total_profit_sol, 6),
+            "total_loss_sol": round(total_loss_sol, 6),
+            "net_profit_sol": round(net_profit_sol, 6),
+            "best_trade_profit_sol": round(float(best_trade_profit_sol), 6),
+            "worst_trade_loss_sol": round(float(worst_trade_loss_sol), 6),
+            "best_trade_roi": round(float(best_trade_roi), 4),
+            "worst_trade_roi": round(float(worst_trade_roi), 4),
+            # Quick win and % profit highlights
+            "quick_wins_30m": int(quick_30m),
+            "quick_wins_2h": int(quick_2h),
+            "quick_wins_6h": int(quick_6h),
+            "big_roi_50_count": int(roi_50),
+            "big_roi_100_count": int(roi_100),
+            "big_roi_200_count": int(roi_200),
+            "median_win_hold_minutes": round(float(median_win_hold_minutes), 2),
         },
     }
     logger.info("grade_wallet:done address=%s score=%s", address, score)
@@ -436,7 +457,7 @@ def grade_wallet(address: str) -> Dict[str, Any]:
 
 
 def _analyze_signatures_full(client: Client, public_key: Any, signatures_json: List[Dict[str, Any]]) -> Dict[str, Any]:
-    # This largely mirrors the logic inside grade_wallet but runs across all given signatures.
+    # Profit-first analyzer across a provided signatures set (used by deep scans)
     balance_lamports = 0
     try:
         balance_resp = client.get_balance(public_key)
@@ -449,28 +470,8 @@ def _analyze_signatures_full(client: Client, public_key: Any, signatures_json: L
         balance_lamports = 0
     sol_balance = balance_lamports / 1_000_000_000
 
-    # Times for inter-tx spacing
     times_desc: List[int] = [s.get("blockTime") for s in signatures_json if s.get("blockTime")]
     times_asc: List[int] = sorted(times_desc)
-    inter_tx_hours: List[float] = []
-    for i in range(1, len(times_asc)):
-        dt_sec = max(0, times_asc[i] - times_asc[i - 1])
-        inter_tx_hours.append(dt_sec / 3600.0)
-
-    def _median(nums: List[float]) -> float:
-        if not nums:
-            return 0.0
-        nums_sorted = sorted(nums)
-        n = len(nums_sorted)
-        mid = n // 2
-        if n % 2 == 1:
-            return float(nums_sorted[mid])
-        return float((nums_sorted[mid - 1] + nums_sorted[mid]) / 2.0)
-
-    median_inter_tx_hours = _median(inter_tx_hours)
-
-    # Program overlap churn
-    sample_for_churn = []
     trade_deltas: List[Tuple[int, float]] = []
     def call_with_retries(fn, *args, **kwargs):
         attempts = 0
@@ -516,18 +517,7 @@ def _analyze_signatures_full(client: Client, public_key: Any, signatures_json: L
             block_time = result_obj.get("blockTime") or result_obj.get("block_time") or s.get("blockTime")
             if not block_time:
                 continue
-            program_ids: Set[str] = set()
-            for ix in msg.get("instructions", []):
-                pid = ix.get("programId") or ix.get("programIdIndex")
-                if isinstance(pid, str):
-                    program_ids.add(pid)
             account_keys = msg.get("accountKeys", [])
-            for key in account_keys:
-                if isinstance(key, str):
-                    program_ids.add(key)
-                elif isinstance(key, dict) and "pubkey" in key:
-                    program_ids.add(key["pubkey"])
-            sample_for_churn.append((int(block_time), program_ids))
 
             # deltas
             try:
@@ -552,44 +542,6 @@ def _analyze_signatures_full(client: Client, public_key: Any, signatures_json: L
         if (time.time() - started) > TIME_BUDGET_SEC:
             break
 
-    # Churn
-    sample_for_churn_sorted = sorted(sample_for_churn, key=lambda t: t[0])
-    repeat_sequences_6h = 0
-    for i in range(1, len(sample_for_churn_sorted)):
-        t_prev, progs_prev = sample_for_churn_sorted[i - 1]
-        t_curr, progs_curr = sample_for_churn_sorted[i]
-        if (t_curr - t_prev) <= 6 * 3600 and (progs_prev & progs_curr):
-            repeat_sequences_6h += 1
-
-    # Profits
-    trade_deltas_sorted = sorted(trade_deltas, key=lambda t: t[0])
-    min_move_sol = 0.01
-    last_outflow_time: int | None = None
-    last_outflow_amt: float = 0.0
-    successful_roundtrips = 0
-    big_profit_trades = 0
-    best_profit_sol = 0.0
-    total_profit_sol = 0.0
-    positive_tx = 0
-    negative_tx = 0
-    for ts, dsol in trade_deltas_sorted:
-        if dsol > min_move_sol:
-            positive_tx += 1
-            if last_outflow_time is not None and (ts - last_outflow_time) <= 12 * 3600 and dsol >= 1.05 * last_outflow_amt:
-                profit = dsol - last_outflow_amt
-                successful_roundtrips += 1
-                total_profit_sol += profit
-                if profit > best_profit_sol:
-                    best_profit_sol = profit
-                if profit >= 1.0:
-                    big_profit_trades += 1
-                last_outflow_time = None
-                last_outflow_amt = 0.0
-        elif dsol < -min_move_sol:
-            negative_tx += 1
-            last_outflow_time = ts
-            last_outflow_amt = abs(dsol)
-
     # Age and counts
     days_old = 0
     if times_asc:
@@ -597,101 +549,155 @@ def _analyze_signatures_full(client: Client, public_key: Any, signatures_json: L
         days_old = max(0, (datetime.now(timezone.utc) - first_tx_time).days)
     tx_count = len(signatures_json)
 
-    # Reuse the same scoring mix as grade_wallet after profits update
-    # Build a faux signatures_resp-like object and call the profit-weighted path is complex; so re-embed key parts
+    # Reuse the same profit-first logic as in grade_wallet
+    trade_deltas_sorted = sorted(trade_deltas, key=lambda t: t[0])
+    min_move_sol = 0.01
 
-    # Activity shape
-    if tx_count == 0:
-        activity_score = 0
-    elif tx_count <= 5:
-        activity_score = 2
-    elif tx_count <= 15:
-        activity_score = 6
-    elif tx_count <= 60:
-        activity_score = 10
-    elif tx_count <= 120:
-        activity_score = 7
-    else:
-        activity_score = 4
+    class _Cycle2:
+        def __init__(self, start_ts: int, first_outflow: float) -> None:
+            self.start_ts = int(start_ts)
+            self.outflow = float(first_outflow)
+            self.inflow = 0.0
 
-    # Holding quality buckets
-    if median_inter_tx_hours >= 72:
-        hold_points = 20
-    elif median_inter_tx_hours >= 36:
-        hold_points = 16
-    elif median_inter_tx_hours >= 12:
-        hold_points = 10
-    elif median_inter_tx_hours >= 4:
-        hold_points = 6
-    elif median_inter_tx_hours >= 1:
-        hold_points = 2
-    else:
-        hold_points = 0
+    realized: List[Dict[str, float | int]] = []
+    open_cycle: _Cycle2 | None = None
+    for ts, dsol in trade_deltas_sorted:
+        if dsol < -min_move_sol:
+            if open_cycle is None:
+                open_cycle = _Cycle2(ts, abs(dsol))
+            else:
+                open_cycle.outflow += abs(dsol)
+        elif dsol > min_move_sol:
+            if open_cycle is None:
+                continue
+            remaining_needed = max(0.0, open_cycle.outflow - open_cycle.inflow)
+            consume = min(float(dsol), remaining_needed)
+            open_cycle.inflow += consume
+            if open_cycle.inflow + 1e-9 >= open_cycle.outflow:
+                outflow = open_cycle.outflow
+                inflow = open_cycle.inflow
+                pnl = inflow - outflow
+                roi = (inflow / outflow - 1.0) if outflow > 0 else 0.0
+                hold_sec = max(0, int(ts - open_cycle.start_ts))
+                realized.append({
+                    "outflow_sol": round(outflow, 9),
+                    "inflow_sol": round(inflow, 9),
+                    "pnl_sol": round(pnl, 9),
+                    "roi": round(roi, 6),
+                    "hold_seconds": hold_sec,
+                })
+                open_cycle = None
+
+    wins = [t for t in realized if t["pnl_sol"] > 0]
+    losses = [t for t in realized if t["pnl_sol"] < 0]
+    realized_trades = len(realized)
+    wins_count = len(wins)
+    losses_count = len(losses)
+    total_profit_sol = float(sum(t["pnl_sol"] for t in wins)) if wins else 0.0
+    total_loss_sol = float(sum(t["pnl_sol"] for t in losses)) if losses else 0.0
+    net_profit_sol = total_profit_sol + total_loss_sol
+    win_rate = round(wins_count / realized_trades, 4) if realized_trades > 0 else 0.0
+    profit_factor = (total_profit_sol / abs(total_loss_sol)) if total_loss_sol < 0 else (99.0 if total_profit_sol > 0 else 0.0)
+
+    best_trade_profit_sol = max([t["pnl_sol"] for t in wins], default=0.0)
+    worst_trade_loss_sol = min([t["pnl_sol"] for t in losses], default=0.0)
+    best_trade_roi = max([t["roi"] for t in realized], default=0.0)
+    worst_trade_roi = min([t["roi"] for t in realized], default=0.0)
+
+    win_hold_minutes = [t["hold_seconds"] / 60.0 for t in wins]
+    def _median(vals: List[float]) -> float:
+        if not vals:
+            return 0.0
+        vs = sorted(vals)
+        n = len(vs)
+        m = n // 2
+        return float(vs[m] if n % 2 == 1 else (vs[m - 1] + vs[m]) / 2.0)
+    median_win_hold_minutes = _median(win_hold_minutes)
+    quick_30m = sum(1 for t in wins if t["hold_seconds"] <= 30 * 60)
+    quick_2h = sum(1 for t in wins if 30 * 60 < t["hold_seconds"] <= 2 * 3600)
+    quick_6h = sum(1 for t in wins if 2 * 3600 < t["hold_seconds"] <= 6 * 3600)
+    roi_50 = sum(1 for t in realized if t["roi"] >= 0.5)
+    roi_100 = sum(1 for t in realized if t["roi"] >= 1.0)
+    roi_200 = sum(1 for t in realized if t["roi"] >= 2.0)
+    tail_loss_count = sum(1 for t in losses if t["roi"] <= -0.6)
 
     score = 0
-    # Profits
-    if successful_roundtrips >= 8:
-        score += 50
-    elif successful_roundtrips >= 5:
-        score += 40
-    elif successful_roundtrips >= 3:
-        score += 30
-    elif successful_roundtrips >= 2:
+    if total_profit_sol >= 10:
+        score += 35
+    elif total_profit_sol >= 5:
+        score += 28
+    elif total_profit_sol >= 2:
         score += 20
-    elif successful_roundtrips >= 1:
-        score += 10
+    elif total_profit_sol >= 1:
+        score += 12
+    elif total_profit_sol >= 0.25:
+        score += 6
 
-    if best_profit_sol >= 5 or total_profit_sol >= 10:
-        score += 20
-    elif best_profit_sol >= 2 or total_profit_sol >= 5:
-        score += 15
-    elif best_profit_sol >= 1 or total_profit_sol >= 2:
-        score += 10
-    elif best_profit_sol >= 0.25 or total_profit_sol >= 0.5:
-        score += 5
+    quality_pts = 0
+    if realized_trades >= 3:
+        if win_rate >= 0.75:
+            quality_pts += 14
+        elif win_rate >= 0.65:
+            quality_pts += 10
+        elif win_rate >= 0.55:
+            quality_pts += 6
+        if profit_factor >= 3.0:
+            quality_pts += 6
+        elif profit_factor >= 2.0:
+            quality_pts += 4
+        elif profit_factor >= 1.5:
+            quality_pts += 2
+    score += min(20, quality_pts)
 
-    if sol_balance >= 100:
+    quick_pts = 3 * quick_30m + 2 * quick_2h + 1 * quick_6h
+    score += min(10, quick_pts)
+
+    pct_pts = 2 * roi_200 + 3 * roi_100 + 1 * roi_50
+    score += min(15, pct_pts)
+
+    if best_trade_profit_sol >= 5:
+        score += 10
+    elif best_trade_profit_sol >= 2:
+        score += 7
+    elif best_trade_profit_sol >= 1:
         score += 5
-    elif sol_balance >= 10:
-        score += 4
-    elif sol_balance >= 1:
+    elif best_trade_profit_sol >= 0.5:
         score += 3
-    elif sol_balance >= 0.1:
-        score += 2
-    elif sol_balance > 0:
-        score += 1
 
-    score += activity_score
-    score += hold_points
-    if median_inter_tx_hours > 0 and median_inter_tx_hours < 1:
-        score -= 5
-    if repeat_sequences_6h >= 10:
-        score -= 10
-    elif repeat_sequences_6h >= 6:
+    loss_mag = abs(total_loss_sol)
+    if loss_mag >= 10:
+        score -= 25
+    elif loss_mag >= 5:
+        score -= 18
+    elif loss_mag >= 2:
+        score -= 12
+    elif loss_mag >= 1:
         score -= 7
-    elif repeat_sequences_6h >= 3:
-        score -= 4
 
-    score = max(1, min(100, int(score)))
+    tail_penalty = 2 * tail_loss_count
+    if abs(worst_trade_loss_sol) >= 2.0:
+        tail_penalty += 2
+    score -= min(10, tail_penalty)
+
+    score = max(1, min(100, int(round(score))))
     label = human_label_from_score(score)
 
-    # Profiles
-    if median_inter_tx_hours >= 36:
-        hold_profile = "long holds"
-    elif median_inter_tx_hours >= 12:
-        hold_profile = "swing holds"
-    elif median_inter_tx_hours >= 1:
-        hold_profile = "short holds"
-    elif median_inter_tx_hours >= 0.25:
-        hold_profile = "scalping"
+    if median_win_hold_minutes <= 30 and wins_count > 0:
+        hold_profile = "sniper scalper"
+    elif median_win_hold_minutes <= 120 and wins_count > 0:
+        hold_profile = "scalper"
+    elif median_win_hold_minutes <= 360 and wins_count > 0:
+        hold_profile = "quick swing"
+    elif wins_count > 0:
+        hold_profile = "swing/position"
     else:
-        hold_profile = "high-speed trader"
+        hold_profile = "no realized wins"
 
-    if tx_count <= 15:
+    if realized_trades <= 3:
         activity_profile = "low"
-    elif tx_count <= 60:
+    elif realized_trades <= 10:
         activity_profile = "moderate"
-    elif tx_count <= 120:
+    elif realized_trades <= 30:
         activity_profile = "high"
     else:
         activity_profile = "overactive"
@@ -704,14 +710,27 @@ def _analyze_signatures_full(client: Client, public_key: Any, signatures_json: L
             "sol_balance": sol_balance,
             "recent_tx_count": tx_count,
             "account_age_days": days_old,
-            "median_inter_tx_hours": round(median_inter_tx_hours, 2),
-            "repeat_sequences_6h": repeat_sequences_6h,
             "hold_profile": hold_profile,
             "activity_profile": activity_profile,
-            "successful_trades": successful_roundtrips,
-            "big_profit_trades": big_profit_trades,
-            "best_profit_sol": round(best_profit_sol, 6),
+            "realized_trades": realized_trades,
+            "wins": wins_count,
+            "losses": losses_count,
+            "win_rate": win_rate,
+            "profit_factor": round(profit_factor, 4) if isinstance(profit_factor, float) else profit_factor,
             "total_profit_sol": round(total_profit_sol, 6),
+            "total_loss_sol": round(total_loss_sol, 6),
+            "net_profit_sol": round(net_profit_sol, 6),
+            "best_trade_profit_sol": round(float(best_trade_profit_sol), 6),
+            "worst_trade_loss_sol": round(float(worst_trade_loss_sol), 6),
+            "best_trade_roi": round(float(best_trade_roi), 4),
+            "worst_trade_roi": round(float(worst_trade_roi), 4),
+            "quick_wins_30m": int(quick_30m),
+            "quick_wins_2h": int(quick_2h),
+            "quick_wins_6h": int(quick_6h),
+            "big_roi_50_count": int(roi_50),
+            "big_roi_100_count": int(roi_100),
+            "big_roi_200_count": int(roi_200),
+            "median_win_hold_minutes": round(float(median_win_hold_minutes), 2),
         },
     }
 
