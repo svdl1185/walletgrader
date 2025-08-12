@@ -95,38 +95,7 @@
           setPosition(finalScore);
         }
 
-        async function startDeepScan(address) {
-          try {
-            const startResp = await fetch('/deep-scan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ address }) });
-            const startData = await startResp.json();
-            if (!startResp.ok || !startData.scan_id) throw new Error(startData.error || 'Failed to start deep scan');
-            const scanId = startData.scan_id;
-            const poll = async () => {
-              const r = await fetch(`/deep-scan/${scanId}`);
-              const s = await r.json();
-              if (s.status === 'completed' && s.result) {
-                stopHoveringAndSet(Math.max(1, Math.min(100, parseInt(s.result.score, 10) || 0)));
-                scoreLine.style.display = 'block';
-                scoreValue.textContent = String(s.result.score);
-                scoreName.textContent = String(s.result.label);
-                heurHold.textContent = `Hold profile: ${s.result.metrics.hold_profile}`;
-                heurActivity.textContent = `Activity profile: ${s.result.metrics.activity_profile}`;
-                if (s.partial) {
-                  console.log('Partial scan due to time budget; results approximate.');
-                }
-              } else if (s.status === 'error') {
-                stopHoveringAndSet(1);
-                alert(s.error || 'Deep scan failed');
-              } else {
-                setTimeout(poll, 1500);
-              }
-            };
-            poll();
-          } catch (e) {
-            stopHoveringAndSet(1);
-            alert('Deep scan failed to start');
-          }
-        }
+        // Quick scan only
 
         form.addEventListener('submit', async (e) => {
           e.preventDefault();
@@ -137,7 +106,24 @@
           fill.classList.remove('settle');
           setPosition(Math.floor(Math.random() * 100));
           startHovering();
-          await startDeepScan(address);
+          try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 10000);
+            const resp = await fetch('/grade', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ address }), signal: controller.signal });
+            clearTimeout(timeoutId);
+            let data = {};
+            try { data = await resp.json(); } catch (e) { data = {}; }
+            if (!resp.ok) throw new Error(data.error || 'Failed');
+            stopHoveringAndSet(Math.max(1, Math.min(100, parseInt(data.score, 10) || 0)));
+            scoreLine.style.display = 'block';
+            scoreValue.textContent = String(data.score);
+            scoreName.textContent = String(data.label);
+            heurHold.textContent = `Hold profile: ${data.metrics.hold_profile}`;
+            heurActivity.textContent = `Activity profile: ${data.metrics.activity_profile}`;
+          } catch (e) {
+            stopHoveringAndSet(1);
+            alert('Network error');
+          }
         });
       })();
     </script>

@@ -37,6 +37,9 @@ MAX_PAGES = int(os.environ.get("SCAN_MAX_PAGES", "5"))     # hard cap on pages
 TIME_BUDGET_SEC = float(os.environ.get("SCAN_TIME_BUDGET_SEC", "10"))
 MAX_ANALYZE_TX = int(os.environ.get("SCAN_MAX_ANALYZE_TX", "120"))
 
+# Quick scan aggressiveness (number of transactions to fully fetch)
+QUICK_SAMPLE_TX = int(os.environ.get("QUICK_SAMPLE_TX", "60"))
+
 
 def get_solana_client() -> Client:
     rpc_url = os.environ.get("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
@@ -128,8 +131,8 @@ def grade_wallet(address: str) -> Dict[str, Any]:
         days_old = max(0, (datetime.now(timezone.utc) - first_tx_time).days)
 
     # Inspect a sample of transactions to infer basic trading cadence features
-    # Keep sampling modest to reduce RPC latency and avoid platform timeouts
-    sample_sigs: List[str] = [s.get("signature") for s in signatures_json[:20] if s.get("signature")]
+    # Sample a bounded number of transactions to fully fetch
+    sample_sigs: List[str] = [s.get("signature") for s in signatures_json[:QUICK_SAMPLE_TX] if s.get("signature")]
     sampled_tx: List[Tuple[int, Set[str]]] = []  # list of (timestamp, set(program_ids))
     trade_deltas: List[Tuple[int, float]] = []  # (timestamp, net SOL delta excluding fee)
 
