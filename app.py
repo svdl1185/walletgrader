@@ -53,6 +53,21 @@ YAHOO_CRYPTO: Set[str] = {
     "MATIC", "DOT", "ATOM", "OP", "ARB", "NEAR", "APT", "SUI", "SEI", "TIA",
 }
 
+def _build_chart_url(symbol: str, info: Dict[str, Any] | None, yahoo_long: Dict[str, float] | None) -> str | None:
+    sym = (symbol or "").upper()
+    if info and info.get("pair_address") and info.get("chain"):
+        chain = str(info.get("chain")).lower()
+        pair = info.get("pair_address")
+        return f"https://dexscreener.com/{chain}/{pair}"
+    if sym in YAHOO_STOCKS:
+        return f"https://finance.yahoo.com/quote/{sym}"
+    if sym in YAHOO_CRYPTO:
+        return f"https://finance.yahoo.com/quote/{sym}-USD"
+    # Fallback search
+    if sym:
+        return f"https://dexscreener.com/search?q={requests.utils.quote(sym)}"
+    return None
+
 # Single-scan tuning knobs (set via env for your RPC tier)
 # Defaults tuned to stay under the frontend's 30s timeout; override via env for deeper scans
 PAGE_LIMIT = int(os.environ.get("SCAN_PAGE_LIMIT", "1000"))  # signatures per page
@@ -1243,8 +1258,8 @@ def _twitter_fetch_from_nitter(handle: str, max_results: int = 50) -> List[Dict[
     return []
 
 
-TWEET_SCAN_LIMIT = int(os.environ.get("TWEET_SCAN_LIMIT", "800"))
-TWEET_TIME_BUDGET_SEC = float(os.environ.get("TWEET_TIME_BUDGET_SEC", "12"))
+TWEET_SCAN_LIMIT = int(os.environ.get("TWEET_SCAN_LIMIT", "2000"))
+TWEET_TIME_BUDGET_SEC = float(os.environ.get("TWEET_TIME_BUDGET_SEC", "20"))
 
 
 def _twitter_fetch_recent(handle: str, max_results: int = 100) -> List[Dict[str, Any]]:
@@ -1806,6 +1821,7 @@ def grade_twitter(handle_or_url: str) -> Dict[str, Any]:
                 "approx_since_call_pct": approx,
                 "longterm": longterm,
             })
+        chart_url = _build_chart_url(ident, info, yahoo_long)
         enriched.append({
             "id": ident,
             "kind": evs[0].get("kind", "symbol"),
@@ -1815,6 +1831,9 @@ def grade_twitter(handle_or_url: str) -> Dict[str, Any]:
             "change1h": (info or {}).get("change1h"),
             "change6h": (info or {}).get("change6h"),
             "change24h": (info or {}).get("change24h"),
+            "pair_address": (info or {}).get("pair_address"),
+            "chain": (info or {}).get("chain"),
+            "chart_url": chart_url,
             "calls": per_call,
         })
 

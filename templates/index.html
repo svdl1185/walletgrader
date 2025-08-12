@@ -134,10 +134,9 @@
               const items = [];
               for (const c of data.coins) {
                 const sym = c.symbol || c.id;
-                const addr = c.address || c.id;
                 const liq = c.liquidity_usd ? ` | Lq: $${Math.round(c.liquidity_usd).toLocaleString()}` : '';
-                const dexLink = addr ? `https://dexscreener.com/solana/${addr}` : '#';
-                const header = `<div style="font-weight:700; margin-top:8px;">${sym} <a href="${dexLink}" target="_blank" rel="noopener noreferrer" style="color:#2b6cf0; text-decoration:none;">(chart)</a>${liq}</div>`;
+                const link = c.chart_url || '#';
+                const header = `<div style="font-weight:700; margin-top:8px;">${sym} <a href="${link}" target="_blank" rel="noopener noreferrer" style="color:#2b6cf0; text-decoration:none;">(chart)</a>${liq}</div>`;
                 const calls = Array.isArray(c.calls) ? c.calls : [];
                 const rows = calls.map(ev => {
                   const when = ev.created_at ? new Date(ev.created_at).toLocaleString() : 'time unknown';
