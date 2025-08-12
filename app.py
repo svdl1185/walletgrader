@@ -201,8 +201,22 @@ def grade_wallet(address: str) -> Dict[str, Any]:
                 if isinstance(program_id, str):
                     program_ids.add(program_id)
 
-            # Also include account keys, which may contain program IDs depending on encoding
-            account_keys = msg.get("accountKeys", [])
+            # Build a robust account keys list that includes versioned tx loaded addresses
+            account_keys_raw = msg.get("accountKeys")
+            account_keys: List[Any] = []
+            if isinstance(account_keys_raw, list) and account_keys_raw:
+                account_keys = account_keys_raw
+            else:
+                # Legacy-v0 style fields
+                static_keys = msg.get("staticAccountKeys", []) or []
+                for key in static_keys:
+                    account_keys.append(key)
+                meta_obj = result_obj.get("meta", {})
+                loaded = meta_obj.get("loadedAddresses") or {}
+                for arr_name in ("writable", "readonly"):
+                    for k in loaded.get(arr_name, []) or []:
+                        account_keys.append(k)
+
             for key in account_keys:
                 if isinstance(key, str):
                     program_ids.add(key)
@@ -220,7 +234,14 @@ def grade_wallet(address: str) -> Dict[str, Any]:
                 # Find wallet index in account keys
                 wallet_str = str(public_key)
                 wallet_index = -1
-                for i, k in enumerate(account_keys):
+                # Ensure account_keys includes loaded addresses for versioned tx
+                account_keys_flat: List[str] = []
+                for k in account_keys:
+                    if isinstance(k, str):
+                        account_keys_flat.append(k)
+                    elif isinstance(k, dict) and k.get("pubkey"):
+                        account_keys_flat.append(k["pubkey"])
+                for i, k in enumerate(account_keys_flat):
                     if (isinstance(k, str) and k == wallet_str) or (isinstance(k, dict) and k.get("pubkey") == wallet_str):
                         wallet_index = i
                         break
