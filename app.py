@@ -1337,6 +1337,24 @@ def _twitter_fetch_recent(handle: str, max_results: int = 100) -> List[Dict[str,
                 return items
     except Exception:
         pass
+
+    # Fallback 3: text proxy (Jina AI) on x.com profile
+    try:
+        for scheme in ("http", "https"):
+            url = f"https://r.jina.ai/{scheme}://x.com/{handle}"
+            resp = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
+            if not resp.ok or not resp.text:
+                continue
+            txt = resp.text
+            # Split the big blob into pseudo-tweets by double newlines
+            chunks = [c.strip() for c in txt.split("\n\n") if c.strip()]
+            items: List[Dict[str, Any]] = []
+            for c in chunks[:max_results]:
+                items.append({"id": None, "text": c, "created_at": None})
+            if items:
+                return items
+    except Exception:
+        pass
     return []
 
 
