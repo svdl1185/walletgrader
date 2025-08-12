@@ -10,6 +10,7 @@ from flask import Flask, render_template, request, jsonify
 import logging
 import requests
 from bs4 import BeautifulSoup  # type: ignore
+from urllib.parse import unquote
 
 try:
     from solana.rpc.api import Client  # type: ignore
@@ -1186,6 +1187,25 @@ def _extract_status_id(raw: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _get_bearer_token() -> str | None:
+    """Return a normalized Twitter Bearer token.
+    Some dashboards show it URL-encoded; decode if needed.
+    """
+    token = os.environ.get("TWITTER_BEARER_TOKEN")
+    if not token:
+        return None
+    token = token.strip().strip('"').strip("'")
+    # Heuristic: if looks URL-encoded, decode once
+    if "%" in token or "+" in token:
+        try:
+            decoded = unquote(token)
+            # sanity: decoded should be longer or contain '/' characters
+            if decoded and ("/" in decoded or decoded.count('%') < token.count('%')):
+                token = decoded
+        except Exception:
+            pass
+    return token
+
 def _twitter_fetch_from_nitter(handle: str, max_results: int = 50) -> List[Dict[str, Any]]:
     instances = [
         "https://nitter.net",
@@ -1229,7 +1249,7 @@ TWEET_TIME_BUDGET_SEC = float(os.environ.get("TWEET_TIME_BUDGET_SEC", "12"))
 
 def _twitter_fetch_recent(handle: str, max_results: int = 100) -> List[Dict[str, Any]]:
     # Try Twitter API v2 if bearer provided
-    bearer = os.environ.get("TWITTER_BEARER_TOKEN")
+    bearer = _get_bearer_token()
     if bearer:
         try:
             # Lookup user id
@@ -1295,7 +1315,7 @@ def _twitter_fetch_recent(handle: str, max_results: int = 100) -> List[Dict[str,
 
 def _fetch_single_tweet(tweet_id: str, handle_hint: str | None = None) -> Dict[str, Any] | None:
     # Primary: Twitter API v2
-    bearer = os.environ.get("TWITTER_BEARER_TOKEN")
+    bearer = _get_bearer_token()
     if bearer:
         try:
             r = requests.get(
