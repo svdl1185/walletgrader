@@ -48,21 +48,39 @@ def get_solana_client() -> Client:
 
 
 def human_label_from_score(score: int) -> str:
-    if score >= 95:
-        return "Based"
+    # Special easter-egg score
+    if score == 69:
+        return "Enjoyer"
+
+    # Top tiers
     if score >= 90:
-        return "Cabal"
+        return "Connoisseur"
     if score >= 80:
-        return "Chad"
+        return "Cabal"
     if score >= 70:
-        return "Diamond Hands"
+        return "Chad"
+    if score >= 60:
+        return "Based"
     if score >= 50:
         return "Normie"
+    if score >= 40:
+        return "NPC"
     if score >= 30:
-        return "Paper"
-    if score >= 10:
-        return "Jeet"
-    return "Rug Victim"
+        # Replaced harmful label with a neutral one
+        return "Degen"
+    if score >= 25:
+        return "Tiktokker"
+    if score >= 20:
+        return "Rug Enjoyer"
+
+    # 1–19 broken into 4 neutral tiers of 5 points each
+    if score >= 16:
+        return "Wrecked I"
+    if score >= 11:
+        return "Wrecked II"
+    if score >= 6:
+        return "Wrecked III"
+    return "Wrecked IV"
 
 def grade_wallet(address: str) -> Dict[str, Any]:
     logger.info("grade_wallet:start address=%s", address)
