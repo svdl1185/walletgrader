@@ -1244,7 +1244,7 @@ def _twitter_fetch_recent(handle: str, max_results: int = 100) -> List[Dict[str,
                         f"https://api.twitter.com/2/users/{uid}/tweets",
                         params={
                             "max_results": str(max_results),
-                            "exclude": "retweets,replies",
+                            "exclude": "retweets",
                             "tweet.fields": "created_at,entities",
                         },
                         headers={"Authorization": f"Bearer {bearer}"}, timeout=12,
@@ -1266,7 +1266,7 @@ def _twitter_fetch_recent(handle: str, max_results: int = 100) -> List[Dict[str,
                                 f"https://api.twitter.com/2/users/{uid}/tweets",
                                 params={
                                     "max_results": "100",
-                                    "exclude": "retweets,replies",
+                                    "exclude": "retweets",
                                     "tweet.fields": "created_at,entities",
                                     "pagination_token": next_token,
                                 },
@@ -1632,6 +1632,24 @@ def grade_twitter(handle_or_url: str) -> Dict[str, Any]:
         dedup.append(t)
     tweets = dedup
     events = _extract_coin_mentions_per_tweet(tweets)
+    # As a final fallback, extract uppercase tokens if entities missing
+    if not events:
+        for t in tweets:
+            text = (t.get("text") or "")
+            ts = t.get("created_at")
+            tid = t.get("id")
+            for m in re.finditer(r"\b([A-Z]{2,6})\b", text):
+                sym = m.group(1)
+                if sym in {"THE","AND","FOR","WITH","THIS","FROM","WHAT","WILL","HAVE","THAT","YOUR","JUST","LIKE"}:
+                    continue
+                events.append({
+                    "kind": "symbol",
+                    "id": sym,
+                    "text": text,
+                    "created_at": ts,
+                    "tweet_id": tid,
+                    "source": "uppercase",
+                })
     # If still empty, try a second Nitter instance directly for robustness
     if not events:
         extra = _twitter_fetch_from_nitter(handle, max_results=50)
