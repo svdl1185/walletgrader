@@ -1678,6 +1678,27 @@ def grade_twitter(handle_or_url: str) -> Dict[str, Any]:
                     if yahoo_long:
                         break
         if not info and not yahoo_long:
+            # Still include symbol with unknown performance so UI shows calls
+            per_call_min: List[Dict[str, Any]] = []
+            for ev in evs[:8]:
+                per_call_min.append({
+                    "created_at": ev.get("created_at"),
+                    "source": ev.get("source"),
+                    "tweet_id": ev.get("tweet_id"),
+                    "approx_since_call_pct": None,
+                    "longterm": None,
+                })
+            enriched.append({
+                "id": ident,
+                "kind": evs[0].get("kind", "symbol"),
+                "symbol": ident,
+                "address": None,
+                "liquidity_usd": None,
+                "change1h": None,
+                "change6h": None,
+                "change24h": None,
+                "calls": per_call_min,
+            })
             continue
         # Compute short-term approximations per call
         per_call: List[Dict[str, Any]] = []
