@@ -34,22 +34,29 @@
           </div>
           <div class="label">{{ result.label }}</div>
           <div class="address">{{ result.address }}</div>
+
+          <div class="score-bar" data-final-score="{{ result.score }}">
+            <div class="bar-header">
+              <span>1</span>
+              <span>100</span>
+            </div>
+            <div class="bar-track">
+              <div class="bar-fill"></div>
+              <div class="bar-marker" aria-hidden="true"></div>
+            </div>
+          </div>
         </div>
 
         <div class="metrics">
           <h3>Metrics</h3>
           <ul>
             <li><strong>SOL balance</strong>: {{ '%.4f'|format(result.metrics.sol_balance) }} SOL</li>
-            <li><strong>Recent transactions</strong>: {{ result.metrics.recent_tx_count }}</li>
+            <li><strong>Recent transactions (last 200)</strong>: {{ result.metrics.recent_tx_count }}</li>
             <li><strong>Account age</strong>: {{ result.metrics.account_age_days }} days</li>
-            <li><strong>Unique programs (sampled)</strong>: {{ result.metrics.unique_programs_sampled }}</li>
-            <li><strong>DeFi interactions</strong>:
-              {% if result.metrics.defi_program_hits and result.metrics.defi_program_hits|length > 0 %}
-                {{ result.metrics.defi_program_hits | join(', ') }}
-              {% else %}
-                None detected in sample
-              {% endif %}
-            </li>
+            <li><strong>Median time between txs</strong>: {{ result.metrics.median_inter_tx_hours }} hours</li>
+            <li><strong>Repeat sequences ≤6h</strong>: {{ result.metrics.repeat_sequences_6h }}</li>
+            <li><strong>Hold profile</strong>: {{ result.metrics.hold_profile }}</li>
+            <li><strong>Activity profile</strong>: {{ result.metrics.activity_profile }}</li>
           </ul>
         </div>
       </section>
@@ -64,10 +71,52 @@
     <script>
       (function() {
         const badge = document.querySelector('.score-badge');
-        if (!badge) return;
-        const score = parseInt(badge.getAttribute('data-score') || '0', 10);
-        const hue = Math.max(0, Math.min(120, Math.round((score / 100) * 120))); // red→green
-        badge.style.setProperty('--score-hue', hue);
+        if (badge) {
+          const score = parseInt(badge.getAttribute('data-score') || '0', 10);
+          const hue = Math.max(0, Math.min(120, Math.round((score / 100) * 120))); // red→green
+          badge.style.setProperty('--score-hue', hue);
+        }
+
+        const bar = document.querySelector('.score-bar');
+        if (!bar) return;
+        const finalScore = parseInt(bar.getAttribute('data-final-score') || '0', 10);
+        const track = bar.querySelector('.bar-track');
+        const marker = bar.querySelector('.bar-marker');
+        const fill = bar.querySelector('.bar-fill');
+        if (!track || !marker || !fill) return;
+
+        // Initialize with a random position
+        let position = Math.floor(Math.random() * 100);
+        let direction = Math.random() > 0.5 ? 1 : -1;
+        const start = performance.now();
+        const hoverDuration = 1000 + Math.random() * 800; // 1.0s–1.8s
+
+        function setPosition(pct) {
+          const clamped = Math.max(0, Math.min(100, pct));
+          marker.style.setProperty('--marker-position', String(clamped));
+          fill.style.setProperty('--fill-percentage', String(clamped));
+        }
+
+        function hoverStep(now) {
+          const elapsed = now - start;
+          if (elapsed < hoverDuration) {
+            // Oscillate with some randomness
+            position += direction * (3 + Math.random() * 8);
+            if (position >= 100) { position = 100; direction = -1; }
+            if (position <= 0) { position = 0; direction = 1; }
+            setPosition(position);
+            requestAnimationFrame(hoverStep);
+          } else {
+            // Land on final score with a smooth transition
+            marker.classList.add('settle');
+            fill.classList.add('settle');
+            setPosition(finalScore);
+          }
+        }
+
+        // Prime styles and begin hover animation
+        setPosition(position);
+        requestAnimationFrame(hoverStep);
       })();
     </script>
   </body>

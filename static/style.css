@@ -85,6 +85,43 @@ button:hover { filter: brightness(1.05); }
   background: #0b0f17;
   font-size: 56px; font-weight: 800;
 }
+.score-bar {
+  width: 100%;
+  margin-top: 12px;
+}
+.bar-header {
+  display: flex; justify-content: space-between; font-size: 12px; color: var(--subtext);
+  margin: 0 4px 6px;
+}
+.bar-track {
+  --marker-position: 0;
+  --fill-percentage: 0;
+  position: relative;
+  height: 16px;
+  width: 100%;
+  background: #0d1320;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.bar-fill {
+  position: absolute; inset: 0 auto 0 0;
+  width: calc(var(--fill-percentage) * 1%);
+  background: linear-gradient(90deg, #ff6b6b, #ffd66b 40%, #7dff7a 100%);
+  transition: width 700ms cubic-bezier(.22,.61,.36,1);
+}
+.bar-fill.settle { transition: width 600ms cubic-bezier(.22,.61,.36,1.1); }
+
+.bar-marker {
+  --x: calc(var(--marker-position) * 1%);
+  position: absolute; top: 50%; left: var(--x);
+  transform: translate(-50%, -50%);
+  width: 10px; height: 24px; border-radius: 4px;
+  background: var(--text);
+  box-shadow: 0 0 0 2px rgba(255,255,255,0.15);
+  transition: left 700ms cubic-bezier(.22,.61,.36,1);
+}
+.bar-marker.settle { transition: left 600ms cubic-bezier(.22,.61,.36,1.1); }
 .label { font-weight: 700; letter-spacing: 0.6px; }
 .address { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; color: var(--subtext); font-size: 12px; word-break: break-all; text-align: center; }
 

@@ -1,7 +1,7 @@
 import os
 import math
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Set
+from typing import Dict, Any, List, Set, Tuple
 
 from flask import Flask, render_template, request
 
@@ -43,18 +43,6 @@ def human_label_from_score(score: int) -> str:
     if score >= 10:
         return "Jeet"
     return "Rug Victim"
-
-
-KNOWN_DEFI_PROGRAMS: Dict[str, str] = {
-    # Non-exhaustive sample of popular programs; used for small score bonuses
-    "JUP3c2Uh3Mqn4hZ4rYd2G1iC2a9eGdQ5qS4s6c2iPdG": "Jupiter",
-    "RVKd61ztZW9GUWhgSzQmfvuJraG7h1i3Xf7f5o7z88k": "Raydium v4",
-    "orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE": "Orca",
-    "MarBmsSgqKXSSJgh3W9a1fCtt7HSqJj1MqWw5qY8uX5": "Marinade",
-    "JitoStakes3vLZ9M2vVwH7sH5G8fHrVh2kKfH2b2r1rs": "Jito Staking",
-    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA": "SPL Token",
-}
-
 
 def grade_wallet(address: str) -> Dict[str, Any]:
     if Client is None or PublicKey is None:
@@ -119,10 +107,9 @@ def grade_wallet(address: str) -> Dict[str, Any]:
     if first_tx_time is not None:
         days_old = max(0, (datetime.now(timezone.utc) - first_tx_time).days)
 
-    # Inspect a small sample of transactions to infer program diversity and DeFi interactions
-    sample_sigs: List[str] = [s.get("signature") for s in signatures_json[:25] if s.get("signature")]
-    unique_programs: Set[str] = set()
-    defi_program_hits: Set[str] = set()
+    # Inspect a sample of transactions to infer basic trading cadence features
+    sample_sigs: List[str] = [s.get("signature") for s in signatures_json[:40] if s.get("signature")]
+    sampled_tx: List[Tuple[int, Set[str]]] = []  # list of (timestamp, set(program_ids))
 
     for sig in sample_sigs:
         try:
@@ -138,86 +125,153 @@ def grade_wallet(address: str) -> Dict[str, Any]:
                 tx_json = tx_resp
             if not tx_json:
                 continue
-            # Collect program IDs from message account keys that are marked as program or from instructions
-            msg = tx_json.get("result", {}).get("transaction", {}).get("message", {})
-            account_keys = msg.get("accountKeys", [])
-            for key in account_keys:
-                # accountKeys entries can be strings or dicts depending on encoding
-                if isinstance(key, str):
-                    program_id = key
-                elif isinstance(key, dict) and "pubkey" in key:
-                    program_id = key["pubkey"]
-                else:
-                    continue
-                unique_programs.add(program_id)
-                if program_id in KNOWN_DEFI_PROGRAMS:
-                    defi_program_hits.add(program_id)
+            result_obj = tx_json.get("result", {})
+            msg = result_obj.get("transaction", {}).get("message", {})
+            block_time = result_obj.get("blockTime") or result_obj.get("block_time")
+            if not block_time:
+                # Fallback to signatures listing for blockTime
+                try:
+                    block_time = next((s.get("blockTime") for s in signatures_json if s.get("signature") == sig), None)
+                except Exception:
+                    block_time = None
+            if not block_time:
+                continue
 
+            # Collect program IDs from instructions (best signal per tx)
+            program_ids: Set[str] = set()
             instrs = msg.get("instructions", [])
             for ix in instrs:
                 program_id = ix.get("programId") or ix.get("programIdIndex")
                 if isinstance(program_id, str):
-                    unique_programs.add(program_id)
-                    if program_id in KNOWN_DEFI_PROGRAMS:
-                        defi_program_hits.add(program_id)
+                    program_ids.add(program_id)
+
+            # Also include account keys, which may contain program IDs depending on encoding
+            account_keys = msg.get("accountKeys", [])
+            for key in account_keys:
+                if isinstance(key, str):
+                    program_ids.add(key)
+                elif isinstance(key, dict) and "pubkey" in key:
+                    program_ids.add(key["pubkey"])
+
+            sampled_tx.append((int(block_time), program_ids))
         except Exception:
-            # Ignore per-tx failures; continue sampling
             continue
 
-    # Basic scoring heuristic (0-100)
+    # Helper: compute median of a list of numbers
+    def _median(nums: List[float]) -> float:
+        if not nums:
+            return 0.0
+        nums_sorted = sorted(nums)
+        n = len(nums_sorted)
+        mid = n // 2
+        if n % 2 == 1:
+            return float(nums_sorted[mid])
+        return float((nums_sorted[mid - 1] + nums_sorted[mid]) / 2.0)
+
+    # Build inter-transaction timing and simple churn features
+    # Use signatures list for broader time coverage
+    times_desc: List[int] = [s.get("blockTime") for s in signatures_json if s.get("blockTime")]
+    times_asc: List[int] = sorted(times_desc)
+    inter_tx_hours: List[float] = []
+    for i in range(1, len(times_asc)):
+        dt_sec = max(0, times_asc[i] - times_asc[i - 1])
+        inter_tx_hours.append(dt_sec / 3600.0)
+    median_inter_tx_hours = _median(inter_tx_hours)
+
+    # Repeat sequences: adjacent sampled tx that share any program within 6 hours window
+    sampled_tx_sorted = sorted(sampled_tx, key=lambda t: t[0])
+    repeat_sequences_6h = 0
+    for i in range(1, len(sampled_tx_sorted)):
+        t_prev, progs_prev = sampled_tx_sorted[i - 1]
+        t_curr, progs_curr = sampled_tx_sorted[i]
+        if (t_curr - t_prev) <= 6 * 3600 and (progs_prev & progs_curr):
+            repeat_sequences_6h += 1
+
+    # New memecoin-oriented scoring (0-100)
     score = 0
 
-    # Balance weight (0-20)
+    # Balance (0-10) — lightly weighted
     if sol_balance >= 100:
-        score += 20
+        score += 10
     elif sol_balance >= 10:
-        score += 15
+        score += 8
     elif sol_balance >= 1:
-        score += 10
+        score += 6
     elif sol_balance >= 0.1:
-        score += 5
+        score += 3
     elif sol_balance > 0:
-        score += 2
+        score += 1
 
-    # Activity (0-25) within last 200 tx
-    if tx_count >= 1000:
-        score += 25
-    elif tx_count >= 200:
-        score += 20
-    elif tx_count >= 50:
-        score += 15
-    elif tx_count >= 10:
-        score += 10
-    elif tx_count >= 1:
-        score += 5
+    # Activity shape (0-25) — moderate activity best, hyperactive penalized later via churn
+    if tx_count == 0:
+        activity_score = 0
+    elif tx_count <= 5:
+        activity_score = 5
+    elif tx_count <= 15:
+        activity_score = 15
+    elif tx_count <= 60:
+        activity_score = 25
+    elif tx_count <= 120:
+        activity_score = 18
+    else:
+        activity_score = 10
+    score += activity_score
 
-    # Account age (0-20)
+    # Account age (0-10) — reduced weight
     if days_old >= 365:
-        score += 20
+        score += 10
     elif days_old >= 180:
-        score += 15
+        score += 8
     elif days_old >= 90:
-        score += 10
+        score += 6
     elif days_old >= 30:
-        score += 5
+        score += 3
 
-    # Program diversity (0-20)
-    program_diversity = len(unique_programs)
-    if program_diversity >= 15:
-        score += 20
-    elif program_diversity >= 8:
-        score += 15
-    elif program_diversity >= 4:
+    # Holding quality (0-35) — reward longer median time between txs
+    if median_inter_tx_hours >= 72:
+        score += 35
+    elif median_inter_tx_hours >= 36:
+        score += 28
+    elif median_inter_tx_hours >= 12:
+        score += 18
+    elif median_inter_tx_hours >= 4:
         score += 10
-    elif program_diversity >= 2:
-        score += 5
+    elif median_inter_tx_hours >= 1:
+        score += 4
 
-    # DeFi bonus (0-10)
-    score += min(10, len(defi_program_hits) * 3)
+    # Churn penalty (up to -15) — frequent in/out and very short holds suggest "jeet" behavior
+    if repeat_sequences_6h >= 10:
+        score -= 10
+    elif repeat_sequences_6h >= 6:
+        score -= 7
+    elif repeat_sequences_6h >= 3:
+        score -= 4
+
+    if median_inter_tx_hours > 0 and median_inter_tx_hours < 1:
+        score -= 5
 
     score = max(1, min(100, int(score)))
 
     label = human_label_from_score(score)
+
+    # Derive simple profiles for display
+    if median_inter_tx_hours >= 36:
+        hold_profile = "long holds"
+    elif median_inter_tx_hours >= 12:
+        hold_profile = "swing holds"
+    elif median_inter_tx_hours >= 1:
+        hold_profile = "short holds"
+    else:
+        hold_profile = "scalping"
+
+    if tx_count <= 15:
+        activity_profile = "low"
+    elif tx_count <= 60:
+        activity_profile = "moderate"
+    elif tx_count <= 120:
+        activity_profile = "high"
+    else:
+        activity_profile = "overactive"
 
     return {
         "address": str(public_key),
@@ -227,8 +281,10 @@ def grade_wallet(address: str) -> Dict[str, Any]:
             "sol_balance": sol_balance,
             "recent_tx_count": tx_count,
             "account_age_days": days_old,
-            "unique_programs_sampled": program_diversity,
-            "defi_program_hits": [KNOWN_DEFI_PROGRAMS.get(p, p) for p in sorted(defi_program_hits)],
+            "median_inter_tx_hours": round(median_inter_tx_hours, 2),
+            "repeat_sequences_6h": repeat_sequences_6h,
+            "hold_profile": hold_profile,
+            "activity_profile": activity_profile,
         },
     }
 
