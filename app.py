@@ -26,13 +26,16 @@ app = Flask(__name__)
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = app.logger
 _LAST_RPC_URL: str | None = None
+WSOL_MINTS: Set[str] = {
+    "So11111111111111111111111111111111111111112",
+}
 
 # Single-scan tuning knobs (set via env for your RPC tier)
-# Recommended for paid RPC (raise gradually): PAGE_LIMIT 500–1000, MAX_PAGES 2–5, MAX_ANALYZE_TX 150–400
-PAGE_LIMIT = int(os.environ.get("SCAN_PAGE_LIMIT", "300"))  # signatures per page
-MAX_PAGES = int(os.environ.get("SCAN_MAX_PAGES", "3"))     # pages of signatures
-TIME_BUDGET_SEC = float(os.environ.get("SCAN_TIME_BUDGET_SEC", "12"))
-MAX_ANALYZE_TX = int(os.environ.get("SCAN_MAX_ANALYZE_TX", "180"))
+# Paid RPC defaults tuned for < ~1 minute wall time on typical wallets
+PAGE_LIMIT = int(os.environ.get("SCAN_PAGE_LIMIT", "1000"))  # signatures per page
+MAX_PAGES = int(os.environ.get("SCAN_MAX_PAGES", "10"))      # pages of signatures
+TIME_BUDGET_SEC = float(os.environ.get("SCAN_TIME_BUDGET_SEC", "55"))
+MAX_ANALYZE_TX = int(os.environ.get("SCAN_MAX_ANALYZE_TX", "600"))
 
 
 def get_solana_client() -> Client:
@@ -225,7 +228,7 @@ def grade_wallet(address: str) -> Dict[str, Any]:
 
             sampled_tx.append((int(block_time), program_ids))
 
-            # Compute net SOL delta for this wallet excluding fee, if metadata is available
+            # Compute net SOL + wSOL delta for this wallet excluding fee on native leg, if metadata is available
             try:
                 meta = result_obj.get("meta", {})
                 pre_balances = meta.get("preBalances", [])
@@ -245,10 +248,55 @@ def grade_wallet(address: str) -> Dict[str, Any]:
                     if (isinstance(k, str) and k == wallet_str) or (isinstance(k, dict) and k.get("pubkey") == wallet_str):
                         wallet_index = i
                         break
+                native_delta_sol = 0.0
                 if wallet_index >= 0 and wallet_index < len(pre_balances) and wallet_index < len(post_balances):
                     delta_lamports = int(post_balances[wallet_index]) - int(pre_balances[wallet_index]) + fee_lamports
-                    delta_sol = float(delta_lamports) / 1_000_000_000.0
-                    trade_deltas.append((int(block_time), delta_sol))
+                    native_delta_sol = float(delta_lamports) / 1_000_000_000.0
+
+                # Include wSOL token balance delta (sum across all wallet-owned wSOL accounts)
+                wsol_delta_tokens = 0.0
+                try:
+                    pre_toks = meta.get("preTokenBalances", []) or []
+                    post_toks = meta.get("postTokenBalances", []) or []
+                    # Build maps (mint, owner, accountIndex?) -> ui amount
+                    def extract_map(arr):
+                        m = {}
+                        for b in arr:
+                            mint = b.get("mint")
+                            owner = b.get("owner") or (b.get("accountOwner") if isinstance(b.get("accountOwner"), str) else None)
+                            ui = None
+                            amt = b.get("uiTokenAmount") or {}
+                            if isinstance(amt, dict):
+                                ui = amt.get("uiAmount")
+                                if ui is None:
+                                    # Fallback from amount/decimals
+                                    try:
+                                        raw = int(amt.get("amount", "0"))
+                                        dec = int(amt.get("decimals", 0))
+                                        ui = float(raw) / (10 ** dec)
+                                    except Exception:
+                                        ui = 0.0
+                            elif isinstance(amt, (int, float)):
+                                ui = float(amt)
+                            if mint and owner:
+                                m[(mint, owner)] = float(ui or 0.0)
+                        return m
+                    pre_map = extract_map(pre_toks)
+                    post_map = extract_map(post_toks)
+                    for (mint, owner), pre_ui in pre_map.items():
+                        if mint in WSOL_MINTS and owner == wallet_str:
+                            post_ui = post_map.get((mint, owner), 0.0)
+                            wsol_delta_tokens += (post_ui - pre_ui)
+                    # Also handle accounts that only appear post-
+                    for (mint, owner), post_ui in post_map.items():
+                        if (mint, owner) not in pre_map and mint in WSOL_MINTS and owner == wallet_str:
+                            wsol_delta_tokens += post_ui
+                except Exception:
+                    wsol_delta_tokens = 0.0
+
+                delta_sol_total = native_delta_sol + float(wsol_delta_tokens)
+                if abs(delta_sol_total) > 1e-9:
+                    trade_deltas.append((int(block_time), delta_sol_total))
             except Exception:
                 pass
         except Exception:
@@ -274,31 +322,26 @@ def grade_wallet(address: str) -> Dict[str, Any]:
     trade_deltas_sorted = sorted(trade_deltas, key=lambda t: t[0])
     min_move_sol = 0.01  # ignore tiny moves
 
+    # Aggregate cycle model: realize a trade only when cumulative inflow >= cumulative outflow
     class _Cycle:
         def __init__(self, start_ts: int, first_outflow: float) -> None:
             self.start_ts = int(start_ts)
-            self.outflow = float(first_outflow)  # total SOL spent (cost basis)
-            self.inflow = 0.0  # total SOL received
+            self.outflow = float(first_outflow)
+            self.inflow = 0.0
 
     realized: List[Dict[str, float | int]] = []
     open_cycle: _Cycle | None = None
 
     for ts, dsol in trade_deltas_sorted:
         if dsol < -min_move_sol:
-            # Spend SOL (likely buy)
             if open_cycle is None:
                 open_cycle = _Cycle(ts, abs(dsol))
             else:
                 open_cycle.outflow += abs(dsol)
         elif dsol > min_move_sol:
-            # Receive SOL (likely sell)
             if open_cycle is None:
-                # Positive inflow without prior spend: ignore for realized PnL (could be deposit/airdrop)
                 continue
-            remaining_needed = max(0.0, open_cycle.outflow - open_cycle.inflow)
-            consume = min(float(dsol), remaining_needed)
-            open_cycle.inflow += consume
-            # If cycle fully closed (recovered at least cost), realize PnL
+            open_cycle.inflow += float(dsol)
             if open_cycle.inflow + 1e-9 >= open_cycle.outflow:
                 outflow = open_cycle.outflow
                 inflow = open_cycle.inflow
@@ -312,7 +355,6 @@ def grade_wallet(address: str) -> Dict[str, Any]:
                     "roi": round(roi, 6),
                     "hold_seconds": hold_sec,
                 })
-                # Remainder of inflow (if any) is ignored; start fresh
                 open_cycle = None
         # else small noise ignored
 
