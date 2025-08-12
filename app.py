@@ -359,32 +359,42 @@ def grade_wallet(address: str) -> Dict[str, Any]:
     # Dynamic minimum move threshold in SOL based on USD size
     min_move_sol = max(0.01, MIN_TRADE_USD / max(1e-6, SOL_PRICE_USD))
 
-    # Aggregate cycle model: realize a trade only when cumulative inflow >= cumulative outflow
-    class _Cycle:
-        def __init__(self, start_ts: int, first_outflow: float) -> None:
-            self.start_ts = int(start_ts)
-            self.outflow = float(first_outflow)
-            self.inflow = 0.0
+    # FIFO proportional realization: close earliest outflow legs with inflows and realize PnL = inflow_consumed - outflow_consumed
+    from collections import deque
+    class _Leg:
+        def __init__(self, ts: int, amt: float) -> None:
+            self.ts = int(ts)
+            self.amt = float(amt)
 
+    outflow_legs: deque[_Leg] = deque()
     realized: List[Dict[str, float | int]] = []
-    open_cycle: _Cycle | None = None
 
     for ts, dsol in trade_deltas_sorted:
         if dsol < -min_move_sol:
-            if open_cycle is None:
-                open_cycle = _Cycle(ts, abs(dsol))
-            else:
-                open_cycle.outflow += abs(dsol)
+            # Record cost leg
+            outflow_legs.append(_Leg(ts, abs(dsol)))
         elif dsol > min_move_sol:
-            if open_cycle is None:
+            inflow_remaining = float(dsol)
+            if not outflow_legs:
                 continue
-            open_cycle.inflow += float(dsol)
-            if open_cycle.inflow + 1e-9 >= open_cycle.outflow:
-                outflow = open_cycle.outflow
-                inflow = open_cycle.inflow
+            consumed_outflow = 0.0
+            consumed_inflow = 0.0
+            first_leg_ts = outflow_legs[0].ts
+            while inflow_remaining > 1e-9 and outflow_legs:
+                leg = outflow_legs[0]
+                take = min(leg.amt, inflow_remaining)
+                leg.amt -= take
+                inflow_remaining -= take
+                consumed_outflow += take
+                consumed_inflow += take
+                if leg.amt <= 1e-9:
+                    outflow_legs.popleft()
+            if consumed_outflow > 1e-9:
+                outflow = consumed_outflow
+                inflow = consumed_inflow
                 pnl = inflow - outflow
                 roi = (inflow / outflow - 1.0) if outflow > 0 else 0.0
-                hold_sec = max(0, int(ts - open_cycle.start_ts))
+                hold_sec = max(0, int(ts - first_leg_ts))
                 realized.append({
                     "outflow_sol": round(outflow, 9),
                     "inflow_sol": round(inflow, 9),
@@ -392,7 +402,6 @@ def grade_wallet(address: str) -> Dict[str, Any]:
                     "roi": round(roi, 6),
                     "hold_seconds": hold_sec,
                 })
-                open_cycle = None
         # else small noise ignored
 
     # Aggregate metrics
@@ -471,9 +480,9 @@ def grade_wallet(address: str) -> Dict[str, Any]:
     quick_pts = 3 * quick_30m + 2 * quick_2h + 1 * quick_6h
     score += min(10, quick_pts)
 
-    # Big percentage profit bonus (0-15)
-    pct_pts = 2 * roi_200 + 3 * roi_100 + 1 * roi_50
-    score += min(15, pct_pts)
+    # Big percentage profit bonus (0-20)
+    pct_pts = 3 * roi_200 + 4 * roi_100 + 1 * roi_50
+    score += min(20, pct_pts)
 
     # Big absolute win bonus (0-10)
     if best_trade_profit_sol >= 5:
@@ -498,11 +507,11 @@ def grade_wallet(address: str) -> Dict[str, Any]:
     elif loss_mag >= 1:
         score -= 5
 
-    # Tail loss penalty (up to -10)
-    tail_penalty = 2 * tail_loss_count
+    # Tail loss penalty (up to -8)
+    tail_penalty = 1 * tail_loss_count
     if abs(worst_trade_loss_sol) >= 2.0:
         tail_penalty += 2
-    score -= min(10, tail_penalty)
+    score -= min(8, tail_penalty)
 
     # Fallback scoring if no realized trades were detected
     if realized_trades == 0:
