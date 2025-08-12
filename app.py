@@ -111,6 +111,7 @@ def grade_wallet(address: str) -> Dict[str, Any]:
     # Keep sampling modest to reduce RPC latency and avoid platform timeouts
     sample_sigs: List[str] = [s.get("signature") for s in signatures_json[:20] if s.get("signature")]
     sampled_tx: List[Tuple[int, Set[str]]] = []  # list of (timestamp, set(program_ids))
+    trade_deltas: List[Tuple[int, float]] = []  # (timestamp, net SOL delta excluding fee)
 
     for sig in sample_sigs:
         try:
@@ -155,6 +156,26 @@ def grade_wallet(address: str) -> Dict[str, Any]:
                     program_ids.add(key["pubkey"])
 
             sampled_tx.append((int(block_time), program_ids))
+
+            # Compute net SOL delta for this wallet excluding fee, if metadata is available
+            try:
+                meta = result_obj.get("meta", {})
+                pre_balances = meta.get("preBalances", [])
+                post_balances = meta.get("postBalances", [])
+                fee_lamports = int(meta.get("fee", 0) or 0)
+                # Find wallet index in account keys
+                wallet_str = str(public_key)
+                wallet_index = -1
+                for i, k in enumerate(account_keys):
+                    if (isinstance(k, str) and k == wallet_str) or (isinstance(k, dict) and k.get("pubkey") == wallet_str):
+                        wallet_index = i
+                        break
+                if wallet_index >= 0 and wallet_index < len(pre_balances) and wallet_index < len(post_balances):
+                    delta_lamports = int(post_balances[wallet_index]) - int(pre_balances[wallet_index]) + fee_lamports
+                    delta_sol = float(delta_lamports) / 1_000_000_000.0
+                    trade_deltas.append((int(block_time), delta_sol))
+            except Exception:
+                pass
         except Exception:
             continue
 
@@ -188,57 +209,115 @@ def grade_wallet(address: str) -> Dict[str, Any]:
         if (t_curr - t_prev) <= 6 * 3600 and (progs_prev & progs_curr):
             repeat_sequences_6h += 1
 
-    # New memecoin-oriented scoring (0-100)
+    # Derive trade success heuristics from SOL balance deltas
+    trade_deltas_sorted = sorted(trade_deltas, key=lambda t: t[0])
+    min_move_sol = 0.01  # ignore tiny moves
+    last_outflow_time: int | None = None
+    last_outflow_amt: float = 0.0
+    successful_roundtrips = 0
+    big_profit_trades = 0
+    best_profit_sol = 0.0
+    total_profit_sol = 0.0
+    positive_tx = 0
+    negative_tx = 0
+    for ts, dsol in trade_deltas_sorted:
+        if dsol > min_move_sol:
+            positive_tx += 1
+            if last_outflow_time is not None and (ts - last_outflow_time) <= 12 * 3600 and dsol >= 1.05 * last_outflow_amt:
+                profit = dsol - last_outflow_amt
+                successful_roundtrips += 1
+                total_profit_sol += profit
+                if profit > best_profit_sol:
+                    best_profit_sol = profit
+                if profit >= 1.0:
+                    big_profit_trades += 1
+                last_outflow_time = None
+                last_outflow_amt = 0.0
+        elif dsol < -min_move_sol:
+            negative_tx += 1
+            last_outflow_time = ts
+            last_outflow_amt = abs(dsol)
+        else:
+            # ignore noise
+            pass
+
+    win_rate = 0.0
+    if (positive_tx + negative_tx) > 0:
+        win_rate = round(positive_tx / float(positive_tx + negative_tx), 4)
+
+    # New memecoin-oriented scoring (0-100) with profits focus
     score = 0
 
-    # Balance (0-10) — lightly weighted
-    if sol_balance >= 100:
+    # Profitable roundtrips (0-50)
+    if successful_roundtrips >= 8:
+        score += 50
+    elif successful_roundtrips >= 5:
+        score += 40
+    elif successful_roundtrips >= 3:
+        score += 30
+    elif successful_roundtrips >= 2:
+        score += 20
+    elif successful_roundtrips >= 1:
         score += 10
+
+    # Profit size bonus (0-20)
+    if best_profit_sol >= 5 or total_profit_sol >= 10:
+        score += 20
+    elif best_profit_sol >= 2 or total_profit_sol >= 5:
+        score += 15
+    elif best_profit_sol >= 1 or total_profit_sol >= 2:
+        score += 10
+    elif best_profit_sol >= 0.25 or total_profit_sol >= 0.5:
+        score += 5
+
+    # Balance (0-5) — very light
+    if sol_balance >= 100:
+        score += 5
     elif sol_balance >= 10:
-        score += 8
+        score += 4
     elif sol_balance >= 1:
-        score += 6
-    elif sol_balance >= 0.1:
         score += 3
+    elif sol_balance >= 0.1:
+        score += 2
     elif sol_balance > 0:
         score += 1
 
-    # Activity shape (0-25) — moderate activity best, hyperactive penalized later via churn
+    # Activity shape (0-10) — moderate activity best
     if tx_count == 0:
         activity_score = 0
     elif tx_count <= 5:
-        activity_score = 5
+        activity_score = 2
     elif tx_count <= 15:
-        activity_score = 15
+        activity_score = 6
     elif tx_count <= 60:
-        activity_score = 25
-    elif tx_count <= 120:
-        activity_score = 18
-    else:
         activity_score = 10
+    elif tx_count <= 120:
+        activity_score = 7
+    else:
+        activity_score = 4
     score += activity_score
 
-    # Account age (0-10) — reduced weight
+    # Account age (0-5) — reduced weight
     if days_old >= 365:
-        score += 10
+        score += 5
     elif days_old >= 180:
-        score += 8
-    elif days_old >= 90:
-        score += 6
-    elif days_old >= 30:
-        score += 3
-
-    # Holding quality (0-35) — reward longer median time between txs
-    if median_inter_tx_hours >= 72:
-        score += 35
-    elif median_inter_tx_hours >= 36:
-        score += 28
-    elif median_inter_tx_hours >= 12:
-        score += 18
-    elif median_inter_tx_hours >= 4:
-        score += 10
-    elif median_inter_tx_hours >= 1:
         score += 4
+    elif days_old >= 90:
+        score += 3
+    elif days_old >= 30:
+        score += 2
+
+    # Holding quality (0-20) — reward longer median time between txs
+    if median_inter_tx_hours >= 72:
+        score += 20
+    elif median_inter_tx_hours >= 36:
+        score += 16
+    elif median_inter_tx_hours >= 12:
+        score += 10
+    elif median_inter_tx_hours >= 4:
+        score += 6
+    elif median_inter_tx_hours >= 1:
+        score += 2
 
     # Churn penalty (up to -15) — frequent in/out and very short holds suggest "jeet" behavior
     if repeat_sequences_6h >= 10:
@@ -288,6 +367,11 @@ def grade_wallet(address: str) -> Dict[str, Any]:
             "repeat_sequences_6h": repeat_sequences_6h,
             "hold_profile": hold_profile,
             "activity_profile": activity_profile,
+            "successful_trades": successful_roundtrips,
+            "big_profit_trades": big_profit_trades,
+            "best_profit_sol": round(best_profit_sol, 6),
+            "total_profit_sol": round(total_profit_sol, 6),
+            "win_rate": win_rate,
         },
     }
 
