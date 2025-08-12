@@ -1250,7 +1250,8 @@ TWEET_TIME_BUDGET_SEC = float(os.environ.get("TWEET_TIME_BUDGET_SEC", "12"))
 def _twitter_fetch_recent(handle: str, max_results: int = 100) -> List[Dict[str, Any]]:
     # Try Twitter API v2 if bearer provided
     bearer = _get_bearer_token()
-    if bearer:
+    force_nitter = os.environ.get("FORCE_NITTER", "").lower() in ("1", "true", "yes")
+    if bearer and not force_nitter:
         try:
             # Lookup user id
             r1 = requests.get(
@@ -1310,6 +1311,32 @@ def _twitter_fetch_recent(handle: str, max_results: int = 100) -> List[Dict[str,
     nitter = _twitter_fetch_from_nitter(handle, max_results=min(50, max_results))
     if nitter:
         return nitter
+    # Fallback 2: Nitter RSS
+    try:
+        import xml.etree.ElementTree as ET
+        for base in ("https://nitter.net", "https://nitter.poast.org", "https://n.opnxng.com", "https://nitter.privacydev.net"):
+            url = f"{base}/{handle}/rss"
+            resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+            if not resp.ok or not resp.text:
+                continue
+            root = ET.fromstring(resp.text)
+            items: List[Dict[str, Any]] = []
+            for it in root.findall('.//item'):
+                title_el = it.find('title'); link_el = it.find('link'); date_el = it.find('pubDate')
+                text = title_el.text if title_el is not None else ''
+                link = link_el.text if link_el is not None else ''
+                ts = date_el.text if date_el is not None else None
+                tid = None
+                if link:
+                    m = re.search(r"/status/(\d+)", link)
+                    if m: tid = m.group(1)
+                items.append({"id": tid, "text": text or '', "created_at": ts})
+                if len(items) >= max_results:
+                    break
+            if items:
+                return items
+    except Exception:
+        pass
     return []
 
 
