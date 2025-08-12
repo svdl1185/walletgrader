@@ -665,7 +665,7 @@ def _run_deep_scan(scan_id: str, address: str) -> None:
     max_loops = 200  # safety cap
     try:
         for _ in range(max_loops):
-            resp = client.get_signatures_for_address(public_key, before=before_sig, limit=1000)
+            resp = client.get_signatures_for_address(public_key, before=before_sig, limit=500)
             batch: List[Any] = []
             if hasattr(resp, "value"):
                 batch = getattr(resp, "value", [])

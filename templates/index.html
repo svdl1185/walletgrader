@@ -3,64 +3,47 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Solana Wallet Grader</title>
+    <title>Wallet Grader</title>
     <link rel="stylesheet" href="/static/style.css" />
   </head>
-  <body>
+  <body class="light">
     <main class="container">
-      <header>
-        <h1>Solana Wallet Grader</h1>
-        <p class="subtitle">Paste your wallet address to get a vibe-check score from 1–100.</p>
+      <header class="header">
+        <h1>Wallet Grader</h1>
+        <p class="subtitle">Enter a Solana address to run a deep scan and compute your score.</p>
       </header>
 
-      <section class="card">
-        <form method="post" class="form" id="grade-form">
-          <label for="address">Solana wallet address</label>
-          <div class="row">
-            <input type="text" id="address" name="address" placeholder="e.g. 4Nd1m7..." value="" autofocus />
-            <button type="submit">Grade</button>
-          </div>
-          {% if error %}
-          <div class="alert error">{{ error }}</div>
-          {% endif %}
-        </form>
-      </section>
+      <form method="post" class="form" id="grade-form">
+        <label for="address">Solana wallet address</label>
+        <div class="row">
+          <input type="text" id="address" name="address" placeholder="e.g. 4Nd1m7..." value="" autofocus />
+          <button type="submit">Deep scan</button>
+        </div>
+        {% if error %}
+        <div class="alert error">{{ error }}</div>
+        {% endif %}
+      </form>
 
-      <section class="card results" id="results" style="display:none;">
-        <div class="score-wrap">
-          <div class="score-line" id="score-line" style="display:none;">
-            <div class="score-label"><span id="score-value"></span> — <span id="score-name"></span></div>
-            <div class="score-heuristics">
-              <span id="heur-hold"></span> • <span id="heur-activity"></span>
-            </div>
+      <section class="results" id="results" style="display:none;">
+        <div class="score-line" id="score-line" style="display:none;">
+          <div class="score-label"><span id="score-value"></span> — <span id="score-name"></span></div>
+          <div class="score-heuristics">
+            <span id="heur-hold"></span> • <span id="heur-activity"></span>
           </div>
-          <div class="score-bar" id="score-bar" data-final-score="0">
-            <div class="bar-header">
-              <span>1</span>
-              <span>100</span>
-            </div>
-            <div class="bar-track">
-              <div class="bar-fill"></div>
-              <div class="bar-marker" aria-hidden="true"></div>
-            </div>
+        </div>
+        <div class="score-bar" id="score-bar" data-final-score="0">
+          <div class="bar-header">
+            <span>1</span>
+            <span>100</span>
+          </div>
+          <div class="bar-track">
+            <div class="bar-fill"></div>
+            <div class="bar-marker" aria-hidden="true"></div>
           </div>
         </div>
       </section>
 
-      <section class="card" id="explanation">
-        <h3 style="margin: 0 0 8px;">How the memecoin score works</h3>
-        <ul style="list-style: disc; padding-left: 20px; margin: 0; color: var(--subtext); display: grid; gap: 6px;">
-          <li><strong>Holding quality</strong>: higher median time between transactions scores better.</li>
-          <li><strong>Activity shape</strong>: moderate activity is best; hyperactive behavior is reduced.</li>
-          <li><strong>Churn</strong>: frequent in/out within short windows reduces the score.</li>
-          <li><strong>Account age</strong>: contributes a small amount.</li>
-          <li><strong>Balance</strong>: lightly weighted.</li>
-        </ul>
-      </section>
-
-      <div style="text-align:center; color: var(--subtext); margin-top: 12px;">
-        <a href="https://github.com/svdl1185/walletgrader" target="_blank" rel="noopener noreferrer" style="color: var(--primary); text-decoration: none;">View source on GitHub</a>
-      </div>
+      <div class="foot-link"><a href="https://github.com/svdl1185/walletgrader" target="_blank" rel="noopener noreferrer">View source on GitHub</a></div>
     </main>
     <script>
       (function() {
@@ -73,7 +56,6 @@
         const heurHold = document.getElementById('heur-hold');
         const heurActivity = document.getElementById('heur-activity');
         if (!form || !results || !bar) return;
-        const track = bar.querySelector('.bar-track');
         const marker = bar.querySelector('.bar-marker');
         const fill = bar.querySelector('.bar-fill');
 
@@ -81,33 +63,23 @@
           const clamped = Math.max(0, Math.min(100, pct));
           marker.style.setProperty('--marker-position', String(clamped));
           fill.style.setProperty('--fill-percentage', String(clamped));
-          // Map percentage → hue so only the last ~20 points are green
-          // 0–80%: red (0) → yellow (50). 80–100%: yellow (50) → green (120)
-          const hue = clamped < 80
-            ? 0 + (50 * (clamped / 80))
-            : 50 + (70 * ((clamped - 80) / 20));
+          const hue = clamped < 80 ? 50 * (clamped / 80) : 50 + 70 * ((clamped - 80) / 20);
           fill.style.setProperty('--bar-hue', String(Math.round(hue)));
         }
 
         let hoverRAF = 0;
         function startHovering() {
-          // Smooth constant-speed hover that slowly scans the full range
           let position = Math.floor(Math.random() * 101);
           let direction = Math.random() > 0.5 ? 1 : -1;
-          let speed = 0.35; // percent per ms
-
+          const speed = 0.05; // percent per ms (slow)
           marker.classList.add('hovering');
           fill.classList.add('hovering');
-
           let last = performance.now();
           function step(now) {
-            const dt = Math.min(32, now - last); // cap for stability
-            last = now;
+            const dt = Math.min(32, now - last); last = now;
             position += direction * speed * dt;
-
             if (position >= 100) { position = 100; direction = -1; }
             if (position <= 0) { position = 0; direction = 1; }
-
             setPosition(position);
             hoverRAF = requestAnimationFrame(step);
           }
@@ -124,114 +96,47 @@
           setPosition(finalScore);
         }
 
+        async function startDeepScan(address) {
+          try {
+            const startResp = await fetch('/deep-scan', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ address }) });
+            const startData = await startResp.json();
+            if (!startResp.ok || !startData.scan_id) throw new Error(startData.error || 'Failed to start deep scan');
+            const scanId = startData.scan_id;
+            const poll = async () => {
+              const r = await fetch(`/deep-scan/${scanId}`);
+              const s = await r.json();
+              if (s.status === 'completed' && s.result) {
+                stopHoveringAndSet(Math.max(1, Math.min(100, parseInt(s.result.score, 10) || 0)));
+                scoreLine.style.display = 'block';
+                scoreValue.textContent = String(s.result.score);
+                scoreName.textContent = String(s.result.label);
+                heurHold.textContent = `Hold profile: ${s.result.metrics.hold_profile}`;
+                heurActivity.textContent = `Activity profile: ${s.result.metrics.activity_profile}`;
+              } else if (s.status === 'error') {
+                stopHoveringAndSet(1);
+                alert(s.error || 'Deep scan failed');
+              } else {
+                setTimeout(poll, 1500);
+              }
+            };
+            poll();
+          } catch (e) {
+            stopHoveringAndSet(1);
+            alert('Deep scan failed to start');
+          }
+        }
+
         form.addEventListener('submit', async (e) => {
           e.preventDefault();
           const address = (document.getElementById('address') || {}).value || '';
           if (!address.trim()) return;
-
-          // Reset visual state
           results.style.display = 'block';
           marker.classList.remove('settle');
           fill.classList.remove('settle');
           setPosition(Math.floor(Math.random() * 100));
           startHovering();
-
-          try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 15000);
-            const resp = await fetch('/grade', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ address }),
-              signal: controller.signal
-            });
-            clearTimeout(timeoutId);
-            let data = {};
-            try { data = await resp.json(); } catch (e) { data = {}; }
-            if (!resp.ok) {
-              stopHoveringAndSet(1);
-              alert(data.error || 'Failed to grade wallet');
-              return;
-            }
-            // Settle bar at the final score only
-            stopHoveringAndSet(Math.max(1, Math.min(100, parseInt(data.score, 10) || 0)));
-
-            // Reveal score line and heuristics
-            if (scoreLine) {
-              scoreLine.style.display = 'block';
-              scoreValue.textContent = String(data.score);
-              scoreName.textContent = String(data.label);
-              heurHold.textContent = `Hold profile: ${data.metrics.hold_profile}`;
-              heurActivity.textContent = `Activity profile: ${data.metrics.activity_profile}`;
-            }
-
-            // Attach deep scan button dynamically
-            setupDeepScan(address);
-          } catch (err) {
-            stopHoveringAndSet(1);
-            alert('Network error');
-          }
+          await startDeepScan(address);
         });
-
-        function setupDeepScan(address) {
-          if (document.getElementById('deep-scan-btn')) return;
-          const explain = document.getElementById('explanation');
-          if (!explain) return;
-          const btn = document.createElement('button');
-          btn.id = 'deep-scan-btn';
-          btn.textContent = 'Deep scan full history';
-          btn.style.marginTop = '12px';
-          btn.addEventListener('click', async () => {
-            // Start hover as loading indicator
-            results.style.display = 'block';
-            marker.classList.remove('settle');
-            fill.classList.remove('settle');
-            marker.classList.add('hovering');
-            fill.classList.add('hovering');
-            setPosition(Math.floor(Math.random() * 100));
-            if (hoverRAF) cancelAnimationFrame(hoverRAF);
-            let last = performance.now();
-            function step(now) {
-              const dt = Math.min(32, now - last); last = now;
-              const pos = parseFloat(fill.style.getPropertyValue('--fill-percentage')) || 0;
-              const dir = Math.random() > 0.5 ? 1 : -1;
-              setPosition(Math.max(0, Math.min(100, pos + dir * 0.25 * dt)));
-              hoverRAF = requestAnimationFrame(step);
-            }
-            hoverRAF = requestAnimationFrame(step);
-
-            try {
-              const start = await fetch('/deep-scan', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ address })
-              });
-              const { scan_id } = await start.json();
-              if (!scan_id) throw new Error('Failed to start deep scan');
-              // Poll
-              const poll = async () => {
-                const resp = await fetch(`/deep-scan/${scan_id}`);
-                const st = await resp.json();
-                if (st.status === 'completed' && st.result) {
-                  stopHoveringAndSet(st.result.score || 1);
-                  scoreLine.style.display = 'block';
-                  scoreValue.textContent = String(st.result.score);
-                  scoreName.textContent = String(st.result.label);
-                  heurHold.textContent = `Hold profile: ${st.result.metrics.hold_profile}`;
-                  heurActivity.textContent = `Activity profile: ${st.result.metrics.activity_profile}`;
-                } else if (st.status === 'error') {
-                  stopHoveringAndSet(1);
-                  alert(st.error || 'Deep scan failed');
-                } else {
-                  setTimeout(poll, 1500);
-                }
-              };
-              poll();
-            } catch (e) {
-              stopHoveringAndSet(1);
-              alert('Deep scan could not start');
-            }
-          });
-          explain.appendChild(btn);
-        }
       })();
     </script>
   </body>
