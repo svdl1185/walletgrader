@@ -1291,6 +1291,8 @@ def _dexscreener_lookup(ident: str, kind: str) -> Dict[str, Any] | None:
             "liquidity_usd": float((best.get("liquidity", {}) or {}).get("usd") or 0),
             "pair_address": best.get("pairAddress") or best.get("pairAddress"),
         }
+    except Exception:
+        return None
 def _hours_since(dt_iso_str: str | None) -> float | None:
     if not dt_iso_str:
         return None
@@ -1368,8 +1370,6 @@ def _birdeye_history_returns(address: str, call_dt_iso: str) -> Dict[str, float]
                 if p1 > 0:
                     result[k] = (p1 / p0 - 1.0) * 100.0
         return result if result else None
-    except Exception:
-        return None
     except Exception:
         return None
 
