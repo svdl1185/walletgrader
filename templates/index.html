@@ -28,9 +28,6 @@
 
       <section class="card results" id="results" style="display:none;">
         <div class="score-wrap">
-          <div class="label" id="result-label"></div>
-          <div class="address" id="result-address"></div>
-
           <div class="score-bar" id="score-bar" data-final-score="0">
             <div class="bar-header">
               <span>1</span>
@@ -42,26 +39,20 @@
             </div>
           </div>
         </div>
-
-        <div class="metrics">
-          <h3>Metrics</h3>
-          <ul>
-            <li><strong>SOL balance</strong>: <span id="m-sol"></span> SOL</li>
-            <li><strong>Recent transactions (last 200)</strong>: <span id="m-tx"></span></li>
-            <li><strong>Account age</strong>: <span id="m-age"></span> days</li>
-            <li><strong>Median time between txs</strong>: <span id="m-median"></span> hours</li>
-            <li><strong>Repeat sequences ≤6h</strong>: <span id="m-repeat"></span></li>
-            <li><strong>Hold profile</strong>: <span id="m-hold"></span></li>
-            <li><strong>Activity profile</strong>: <span id="m-activity"></span></li>
-          </ul>
-        </div>
       </section>
 
-      <footer>
-        <p class="footnote">
-          This is a heuristic score. Not financial advice. Data fetched from Solana RPC.
-        </p>
-      </footer>
+      <section class="card" id="explanation">
+        <h3 style="margin: 0 0 8px;">How the memecoin score works</h3>
+        <ul style="list-style: disc; padding-left: 20px; margin: 0; color: var(--subtext); display: grid; gap: 6px;">
+          <li><strong>Holding quality</strong>: higher median time between transactions scores better.</li>
+          <li><strong>Activity shape</strong>: moderate activity is best; hyperactive behavior is reduced.</li>
+          <li><strong>Churn</strong>: frequent in/out within short windows reduces the score.</li>
+          <li><strong>Account age</strong>: contributes a small amount.</li>
+          <li><strong>Balance</strong>: lightly weighted.</li>
+        </ul>
+      </section>
+
+      <footer></footer>
     </main>
     <script>
       (function() {
@@ -125,17 +116,7 @@
               alert(data.error || 'Failed to grade wallet');
               return;
             }
-            // Update header and metrics
-            document.getElementById('result-label').textContent = data.label;
-            document.getElementById('result-address').textContent = data.address;
-            document.getElementById('m-sol').textContent = (data.metrics.sol_balance || 0).toFixed(4);
-            document.getElementById('m-tx').textContent = data.metrics.recent_tx_count || 0;
-            document.getElementById('m-age').textContent = data.metrics.account_age_days || 0;
-            document.getElementById('m-median').textContent = data.metrics.median_inter_tx_hours || 0;
-            document.getElementById('m-repeat').textContent = data.metrics.repeat_sequences_6h || 0;
-            document.getElementById('m-hold').textContent = data.metrics.hold_profile || '';
-            document.getElementById('m-activity').textContent = data.metrics.activity_profile || '';
-
+            // Settle bar at the final score only
             stopHoveringAndSet(Math.max(1, Math.min(100, parseInt(data.score, 10) || 0)));
           } catch (err) {
             stopHoveringAndSet(1);
