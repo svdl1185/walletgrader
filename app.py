@@ -29,6 +29,10 @@ _LAST_RPC_URL: str | None = None
 WSOL_MINTS: Set[str] = {
     "So11111111111111111111111111111111111111112",
 }
+STABLE_MINTS: Set[str] = {
+    "EPjFWdd5AuJnBfZQ64rW7v6k7hNE9F3iuQF3XzQk3tYE",  # USDC
+    "Es9vMFrzaCQi3QjY6C9p8wG9ZsV5hHok6wJG8YcJ2n6q",  # USDT
+}
 
 # Single-scan tuning knobs (set via env for your RPC tier)
 # Paid RPC defaults tuned for < ~1 minute wall time on typical wallets
@@ -275,8 +279,9 @@ def grade_wallet(address: str) -> Dict[str, Any]:
                     delta_lamports = int(post_balances[wallet_index]) - int(pre_balances[wallet_index]) + fee_lamports
                     native_delta_sol = float(delta_lamports) / 1_000_000_000.0
 
-                # Include wSOL token balance delta (sum across all wallet-owned wSOL accounts)
+                # Include wSOL token balance delta (sum across all wallet-owned wSOL accounts) and stables in SOL-equivalent
                 wsol_delta_tokens = 0.0
+                stable_delta_sol_equiv = 0.0
                 try:
                     pre_toks = meta.get("preTokenBalances", []) or []
                     post_toks = meta.get("postTokenBalances", []) or []
@@ -306,17 +311,26 @@ def grade_wallet(address: str) -> Dict[str, Any]:
                     pre_map = extract_map(pre_toks)
                     post_map = extract_map(post_toks)
                     for (mint, owner), pre_ui in pre_map.items():
-                        if mint in WSOL_MINTS and owner == wallet_str:
-                            post_ui = post_map.get((mint, owner), 0.0)
-                            wsol_delta_tokens += (post_ui - pre_ui)
+                        if owner != wallet_str:
+                            continue
+                        post_ui = post_map.get((mint, owner), 0.0)
+                        delta_ui = (post_ui - pre_ui)
+                        if mint in WSOL_MINTS:
+                            wsol_delta_tokens += delta_ui
+                        elif mint in STABLE_MINTS:
+                            stable_delta_sol_equiv += float(delta_ui) / max(1e-6, SOL_PRICE_USD)
                     # Also handle accounts that only appear post-
                     for (mint, owner), post_ui in post_map.items():
-                        if (mint, owner) not in pre_map and mint in WSOL_MINTS and owner == wallet_str:
-                            wsol_delta_tokens += post_ui
+                        if (mint, owner) not in pre_map and owner == wallet_str:
+                            if mint in WSOL_MINTS:
+                                wsol_delta_tokens += post_ui
+                            elif mint in STABLE_MINTS:
+                                stable_delta_sol_equiv += float(post_ui) / max(1e-6, SOL_PRICE_USD)
                 except Exception:
                     wsol_delta_tokens = 0.0
+                    stable_delta_sol_equiv = 0.0
 
-                delta_sol_total = native_delta_sol + float(wsol_delta_tokens)
+                delta_sol_total = native_delta_sol + float(wsol_delta_tokens) + float(stable_delta_sol_equiv)
                 if abs(delta_sol_total) > 1e-9:
                     trade_deltas.append((int(block_time), delta_sol_total))
             except Exception:
@@ -424,17 +438,17 @@ def grade_wallet(address: str) -> Dict[str, Any]:
     # Score assembly (0-100), profit-first
     score = 0
 
-    # Absolute profit size (0-35)
+    # Absolute profit size (0-40) — slightly buff gains
     if total_profit_sol >= 10:
-        score += 35
+        score += 40
     elif total_profit_sol >= 5:
-        score += 28
+        score += 32
     elif total_profit_sol >= 2:
-        score += 20
+        score += 24
     elif total_profit_sol >= 1:
-        score += 12
+        score += 16
     elif total_profit_sol >= 0.25:
-        score += 6
+        score += 8
 
     # Profit quality (0-20): win rate + profit factor
     quality_pts = 0
