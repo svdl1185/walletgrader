@@ -69,22 +69,6 @@ button:hover { filter: brightness(1.05); }
 .results { margin-top: 20px; display: grid; grid-template-columns: 260px 1fr; gap: 24px; }
 
 .score-wrap { display: flex; flex-direction: column; align-items: center; gap: 8px; }
-.score-badge {
-  --score-hue: 120;
-  width: 180px; height: 180px;
-  border-radius: 50%;
-  display: grid; place-items: center;
-  background: conic-gradient(from -90deg, hsl(var(--score-hue), 90%, 50%), transparent 70%);
-  border: 1px solid var(--border);
-  box-shadow: 0 0 0 6px rgba(255,255,255,0.04) inset;
-}
-.score {
-  width: 150px; height: 150px;
-  border-radius: 50%;
-  display: grid; place-items: center;
-  background: #0b0f17;
-  font-size: 56px; font-weight: 800;
-}
 .score-bar {
   width: 100%;
   margin-top: 12px;

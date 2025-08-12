@@ -14,7 +14,7 @@
       </header>
 
       <section class="card">
-        <form method="post" class="form">
+        <form method="post" class="form" id="grade-form">
           <label for="address">Solana wallet address</label>
           <div class="row">
             <input type="text" id="address" name="address" placeholder="e.g. 4Nd1m7..." value="" autofocus />
@@ -26,16 +26,12 @@
         </form>
       </section>
 
-      {% if result and not error %}
-      <section class="card results">
+      <section class="card results" id="results" style="display:none;">
         <div class="score-wrap">
-          <div class="score-badge" data-score="{{ result.score }}">
-            <div class="score">{{ result.score }}</div>
-          </div>
-          <div class="label">{{ result.label }}</div>
-          <div class="address">{{ result.address }}</div>
+          <div class="label" id="result-label"></div>
+          <div class="address" id="result-address"></div>
 
-          <div class="score-bar" data-final-score="{{ result.score }}">
+          <div class="score-bar" id="score-bar" data-final-score="0">
             <div class="bar-header">
               <span>1</span>
               <span>100</span>
@@ -50,17 +46,16 @@
         <div class="metrics">
           <h3>Metrics</h3>
           <ul>
-            <li><strong>SOL balance</strong>: {{ '%.4f'|format(result.metrics.sol_balance) }} SOL</li>
-            <li><strong>Recent transactions (last 200)</strong>: {{ result.metrics.recent_tx_count }}</li>
-            <li><strong>Account age</strong>: {{ result.metrics.account_age_days }} days</li>
-            <li><strong>Median time between txs</strong>: {{ result.metrics.median_inter_tx_hours }} hours</li>
-            <li><strong>Repeat sequences ≤6h</strong>: {{ result.metrics.repeat_sequences_6h }}</li>
-            <li><strong>Hold profile</strong>: {{ result.metrics.hold_profile }}</li>
-            <li><strong>Activity profile</strong>: {{ result.metrics.activity_profile }}</li>
+            <li><strong>SOL balance</strong>: <span id="m-sol"></span> SOL</li>
+            <li><strong>Recent transactions (last 200)</strong>: <span id="m-tx"></span></li>
+            <li><strong>Account age</strong>: <span id="m-age"></span> days</li>
+            <li><strong>Median time between txs</strong>: <span id="m-median"></span> hours</li>
+            <li><strong>Repeat sequences ≤6h</strong>: <span id="m-repeat"></span></li>
+            <li><strong>Hold profile</strong>: <span id="m-hold"></span></li>
+            <li><strong>Activity profile</strong>: <span id="m-activity"></span></li>
           </ul>
         </div>
       </section>
-      {% endif %}
 
       <footer>
         <p class="footnote">
@@ -70,26 +65,13 @@
     </main>
     <script>
       (function() {
-        const badge = document.querySelector('.score-badge');
-        if (badge) {
-          const score = parseInt(badge.getAttribute('data-score') || '0', 10);
-          const hue = Math.max(0, Math.min(120, Math.round((score / 100) * 120))); // red→green
-          badge.style.setProperty('--score-hue', hue);
-        }
-
-        const bar = document.querySelector('.score-bar');
-        if (!bar) return;
-        const finalScore = parseInt(bar.getAttribute('data-final-score') || '0', 10);
+        const form = document.getElementById('grade-form');
+        const results = document.getElementById('results');
+        const bar = document.getElementById('score-bar');
+        if (!form || !results || !bar) return;
         const track = bar.querySelector('.bar-track');
         const marker = bar.querySelector('.bar-marker');
         const fill = bar.querySelector('.bar-fill');
-        if (!track || !marker || !fill) return;
-
-        // Initialize with a random position
-        let position = Math.floor(Math.random() * 100);
-        let direction = Math.random() > 0.5 ? 1 : -1;
-        const start = performance.now();
-        const hoverDuration = 1000 + Math.random() * 800; // 1.0s–1.8s
 
         function setPosition(pct) {
           const clamped = Math.max(0, Math.min(100, pct));
@@ -97,26 +79,69 @@
           fill.style.setProperty('--fill-percentage', String(clamped));
         }
 
-        function hoverStep(now) {
-          const elapsed = now - start;
-          if (elapsed < hoverDuration) {
-            // Oscillate with some randomness
+        let hoverRAF = 0;
+        function startHovering() {
+          let position = Math.floor(Math.random() * 100);
+          let direction = Math.random() > 0.5 ? 1 : -1;
+          function step() {
             position += direction * (3 + Math.random() * 8);
             if (position >= 100) { position = 100; direction = -1; }
             if (position <= 0) { position = 0; direction = 1; }
             setPosition(position);
-            requestAnimationFrame(hoverStep);
-          } else {
-            // Land on final score with a smooth transition
-            marker.classList.add('settle');
-            fill.classList.add('settle');
-            setPosition(finalScore);
+            hoverRAF = requestAnimationFrame(step);
           }
+          setPosition(position);
+          hoverRAF = requestAnimationFrame(step);
         }
 
-        // Prime styles and begin hover animation
-        setPosition(position);
-        requestAnimationFrame(hoverStep);
+        function stopHoveringAndSet(finalScore) {
+          if (hoverRAF) cancelAnimationFrame(hoverRAF);
+          marker.classList.add('settle');
+          fill.classList.add('settle');
+          setPosition(finalScore);
+        }
+
+        form.addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const address = (document.getElementById('address') || {}).value || '';
+          if (!address.trim()) return;
+
+          // Reset visual state
+          results.style.display = 'block';
+          marker.classList.remove('settle');
+          fill.classList.remove('settle');
+          setPosition(Math.floor(Math.random() * 100));
+          startHovering();
+
+          try {
+            const resp = await fetch('/grade', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ address })
+            });
+            const data = await resp.json();
+            if (!resp.ok) {
+              stopHoveringAndSet(1);
+              alert(data.error || 'Failed to grade wallet');
+              return;
+            }
+            // Update header and metrics
+            document.getElementById('result-label').textContent = data.label;
+            document.getElementById('result-address').textContent = data.address;
+            document.getElementById('m-sol').textContent = (data.metrics.sol_balance || 0).toFixed(4);
+            document.getElementById('m-tx').textContent = data.metrics.recent_tx_count || 0;
+            document.getElementById('m-age').textContent = data.metrics.account_age_days || 0;
+            document.getElementById('m-median').textContent = data.metrics.median_inter_tx_hours || 0;
+            document.getElementById('m-repeat').textContent = data.metrics.repeat_sequences_6h || 0;
+            document.getElementById('m-hold').textContent = data.metrics.hold_profile || '';
+            document.getElementById('m-activity').textContent = data.metrics.activity_profile || '';
+
+            stopHoveringAndSet(Math.max(1, Math.min(100, parseInt(data.score, 10) || 0)));
+          } catch (err) {
+            stopHoveringAndSet(1);
+            alert('Network error');
+          }
+        });
       })();
     </script>
   </body>

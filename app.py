@@ -3,7 +3,7 @@ import math
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Set, Tuple
 
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, jsonify
 
 try:
     from solana.rpc.api import Client  # type: ignore
@@ -295,6 +295,7 @@ def index():
     error: str | None = None
 
     if request.method == "POST":
+        # Legacy fallback: still render page if form posts without JS
         address = request.form.get("address", "").strip()
         if not address:
             error = "Please enter a Solana wallet address."
@@ -303,6 +304,17 @@ def index():
             error = result.get("error") if isinstance(result, dict) and result.get("error") else None
 
     return render_template("index.html", result=result, error=error)
+
+
+@app.post("/grade")
+def grade_api():
+    data = request.get_json(silent=True) or {}
+    address = (data.get("address") or request.form.get("address") or "").strip()
+    if not address:
+        return jsonify({"error": "Please enter a Solana wallet address."}), 400
+    result = grade_wallet(address)
+    status = 200 if not result.get("error") else 400
+    return jsonify(result), status
 
 
 if __name__ == "__main__":
