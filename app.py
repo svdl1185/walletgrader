@@ -4,9 +4,11 @@ from datetime import datetime, timezone
 from typing import Dict, Any, List, Set, Tuple
 import time
 import random
+import re
 
 from flask import Flask, render_template, request, jsonify
 import logging
+import requests
 
 try:
     from solana.rpc.api import Client  # type: ignore
@@ -33,6 +35,10 @@ STABLE_MINTS: Set[str] = {
     "EPjFWdd5AuJnBfZQ64rW7v6k7hNE9F3iuQF3XzQk3tYE",  # USDC
     "Es9vMFrzaCQi3QjY6C9p8wG9ZsV5hHok6wJG8YcJ2n6q",  # USDT
 }
+
+# Dexscreener API base
+DEXSCREENER_SEARCH = "https://api.dexscreener.com/latest/dex/search?q="
+DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens/"
 
 # Single-scan tuning knobs (set via env for your RPC tier)
 # Defaults tuned to stay under the frontend's 30s timeout; override via env for deeper scans
@@ -74,8 +80,7 @@ def human_label_from_score(score: int) -> str:
     if score >= 40:
         return "Degen"
     if score >= 30:
-        # Replaced harmful label with a neutral one
-        return "Jew"
+        return "Skeptic"
     if score >= 25:
         return "Tiktokker"
     if score >= 20:
@@ -89,6 +94,24 @@ def human_label_from_score(score: int) -> str:
     if score >= 6:
         return "Vaishya"
     return "Shudra"
+
+
+def human_label_from_score_twitter(score: int) -> str:
+    if score >= 95:
+        return "Oracle"
+    if score >= 90:
+        return "Alpha Caller"
+    if score >= 80:
+        return "Trusted"
+    if score >= 70:
+        return "Generally Solid"
+    if score >= 60:
+        return "Mixed"
+    if score >= 50:
+        return "Unreliable"
+    if score >= 40:
+        return "Heavy Shiller"
+    return "Mega Shiller"
 
 def grade_wallet(address: str) -> Dict[str, Any]:
     logger.info("grade_wallet:start address=%s", address)
@@ -625,7 +648,7 @@ def grade_wallet(address: str) -> Dict[str, Any]:
         elif window_net_sol >= 0.25:
             score += 8
         elif window_net_sol > 0:
-        score += 6
+            score += 6
 
         # Single strong positive event bonus
         if best_positive_event_sol >= 2:
@@ -643,7 +666,7 @@ def grade_wallet(address: str) -> Dict[str, Any]:
         elif window_negative_sol >= 2:
             score -= 8
         elif window_negative_sol >= 1:
-        score -= 5
+            score -= 5
 
         # Event balance hint
         if positive_events > 0 or negative_events > 0:
@@ -828,7 +851,7 @@ def _analyze_signatures_full(client: Client, public_key: Any, signatures_json: L
         if dsol < -min_move_sol:
             if open_cycle is None:
                 open_cycle = _Cycle2(ts, abs(dsol))
-    else:
+            else:
                 open_cycle.outflow += abs(dsol)
         elif dsol > min_move_sol:
             if open_cycle is None:
@@ -1103,7 +1126,11 @@ def index():
         if not address:
             error = "Please enter a Solana wallet address."
         else:
-            result = grade_wallet(address)
+            # If the input looks like a twitter handle, route to twitter grading for SSR fallback
+            if address.startswith("@") or ("twitter.com/" in address) or ("x.com/" in address):
+                result = grade_twitter(address)
+            else:
+                result = grade_wallet(address)
             error = result.get("error") if isinstance(result, dict) and result.get("error") else None
 
     return render_template("index.html", result=result, error=error)
@@ -1119,6 +1146,241 @@ def grade_api():
     result = grade_wallet(address)
     status = 200 if not result.get("error") else 400
     logger.info("grade_api:response address=%s status=%s", address, status)
+    return jsonify(result), status
+
+
+# ---------------- Twitter reliability grading -----------------
+
+def _extract_handle(raw: str) -> str | None:
+    s = (raw or "").strip()
+    if not s:
+        return None
+    if s.startswith("@"):
+        s = s[1:]
+    # URLs
+    m = re.search(r"(?:https?://)?(?:www\.)?(?:x|twitter)\.com/([A-Za-z0-9_]{1,15})", s)
+    if m:
+        return m.group(1)
+    # Raw handle
+    m2 = re.match(r"^[A-Za-z0-9_]{1,15}$", s)
+    if m2:
+        return s
+    return None
+
+
+def _twitter_fetch_recent_texts(handle: str, max_chars: int = 100_000) -> str:
+    # Try Twitter API v2 if bearer provided
+    bearer = os.environ.get("TWITTER_BEARER_TOKEN")
+    if bearer:
+        try:
+            # Lookup user id
+            r1 = requests.get(
+                f"https://api.twitter.com/2/users/by/username/{handle}",
+                headers={"Authorization": f"Bearer {bearer}"}, timeout=12,
+            )
+            if r1.ok:
+                uid = r1.json().get("data", {}).get("id")
+                if uid:
+                    r2 = requests.get(
+                        f"https://api.twitter.com/2/users/{uid}/tweets",
+                        params={
+                            "max_results": "100",
+                            "exclude": "retweets,replies",
+                            "tweet.fields": "created_at,entities",
+                        },
+                        headers={"Authorization": f"Bearer {bearer}"}, timeout=12,
+                    )
+                    if r2.ok:
+                        texts = "\n\n".join(t.get("text", "") for t in r2.json().get("data", []) or [])
+                        if texts:
+                            return texts[:max_chars]
+        except Exception:
+            pass
+
+    # Fallback: fetch public mirror content through a text proxy to avoid heavy HTML
+    text_sources = [
+        f"https://r.jina.ai/http://nitter.net/{handle}",
+        f"https://r.jina.ai/http://x.com/{handle}",
+        f"https://r.jina.ai/http://twitter.com/{handle}",
+    ]
+    for url in text_sources:
+        try:
+            resp = requests.get(url, timeout=10)
+            if resp.ok and resp.text:
+                return resp.text[:max_chars]
+        except Exception:
+            continue
+    return ""
+
+
+def _extract_coin_mentions(text_blob: str) -> Dict[str, Dict[str, Any]]:
+    mentions: Dict[str, Dict[str, Any]] = {}
+    if not text_blob:
+        return mentions
+    # Cashtags like $COIN or $BONK
+    for m in re.finditer(r"\$([A-Za-z][A-Za-z0-9]{1,15})\b", text_blob):
+        sym = m.group(1).upper()
+        entry = mentions.setdefault(sym, {"kind": "symbol", "id": sym, "mentions": 0})
+        entry["mentions"] += 1
+    # Base58 mint addresses (32-44 chars)
+    for m in re.finditer(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b", text_blob):
+        addr = m.group(0)
+        entry = mentions.setdefault(addr, {"kind": "address", "id": addr, "mentions": 0})
+        entry["mentions"] += 1
+    # pump.fun links contain mint after ? or path
+    for m in re.finditer(r"pump\.fun/(?:token/)?([1-9A-HJ-NP-Za-km-z]{32,44})", text_blob):
+        addr = m.group(1)
+        entry = mentions.setdefault(addr, {"kind": "address", "id": addr, "mentions": 0})
+        entry["mentions"] += 2  # slightly heavier weight when explicitly linked
+    return mentions
+
+
+def _dexscreener_lookup(ident: str, kind: str) -> Dict[str, Any] | None:
+    try:
+        if kind == "address":
+            r = requests.get(DEXSCREENER_TOKEN + ident, timeout=10)
+        else:
+            r = requests.get(DEXSCREENER_SEARCH + requests.utils.quote(ident), timeout=10)
+        if not r.ok:
+            return None
+        data = r.json() if r.headers.get("content-type", "").startswith("application/json") else None
+        if not isinstance(data, dict):
+            return None
+        pairs = data.get("pairs") or data.get("pairsByDexId") or data.get("pairs")
+        if not pairs:
+            return None
+        # Prefer Solana and highest liquidity
+        def _rank(p):
+            chain_ok = 1 if (p.get("chainId") in ("solana", "SOLANA", "solana-mainnet")) else 0
+            liq = float(p.get("liquidity", {}).get("usd", 0) or p.get("liquidity", 0) or 0)
+            return (chain_ok, liq)
+        best = max(pairs, key=_rank)
+        change = best.get("priceChange", {}) or {}
+        return {
+            "symbol": (best.get("baseToken", {}) or {}).get("symbol") or best.get("baseTokenSymbol") or ident,
+            "address": (best.get("baseToken", {}) or {}).get("address") or best.get("baseTokenAddress"),
+            "chain": best.get("chainId") or best.get("chainId"),
+            "change1h": float(change.get("h1") or 0),
+            "change6h": float(change.get("h6") or 0),
+            "change24h": float(change.get("h24") or 0),
+            "liquidity_usd": float((best.get("liquidity", {}) or {}).get("usd") or 0),
+        }
+    except Exception:
+        return None
+
+
+def grade_twitter(handle_or_url: str) -> Dict[str, Any]:
+    handle = _extract_handle(handle_or_url or "")
+    if not handle:
+        return {"error": "Please provide a valid @handle or Twitter URL."}
+    logger.info("grade_twitter:start handle=%s", handle)
+    blob = _twitter_fetch_recent_texts(handle)
+    mentions = _extract_coin_mentions(blob)
+    if not mentions:
+        return {
+            "handle": handle,
+            "score": 50,
+            "label": human_label_from_score_twitter(50),
+            "metrics": {
+                "message": "No coin mentions detected in recent tweets",
+                "unique_coins": 0,
+                "total_mentions": 0,
+            },
+            "coins": [],
+        }
+
+    enriched: List[Dict[str, Any]] = []
+    for ident, meta in list(mentions.items())[:40]:  # cap to keep things fast
+        info = _dexscreener_lookup(ident, meta.get("kind", "symbol"))
+        if not info:
+            continue
+        enriched.append({
+            "id": ident,
+            "kind": meta.get("kind", "symbol"),
+            "mentions": int(meta.get("mentions", 0)),
+            **info,
+        })
+
+    if not enriched:
+        return {
+            "handle": handle,
+            "score": 45,
+            "label": human_label_from_score_twitter(45),
+            "metrics": {
+                "message": "Mentions found but no Dexscreener data",
+                "unique_coins": len(mentions),
+                "total_mentions": int(sum(m.get("mentions", 0) for m in mentions.values())),
+            },
+            "coins": [],
+        }
+
+    total_mentions = int(sum(c["mentions"] for c in enriched))
+    unique_coins = len(enriched)
+
+    # Compute composite performance score weighted by mentions and liquidity
+    perf_sum = 0.0
+    perf_penalty = 0.0
+    for c in enriched:
+        weight = 1.0 + math.log10(max(1, c["mentions"])) + (0.25 if (c.get("liquidity_usd", 0) >= 50_000) else 0.0)
+        # Use the best among short windows to approximate post-shill outcome
+        change_best = max(c.get("change1h", 0) * 0.6, c.get("change6h", 0) * 0.3, c.get("change24h", 0) * 0.1)
+        if change_best >= 0:
+            perf_sum += weight * min(100, change_best)
+        else:
+            perf_penalty += weight * min(100, abs(change_best))
+
+    # Start from high and subtract for over-shilling
+    score = 90
+    # Penalize many unique coins
+    if unique_coins > 3:
+        score -= min(40, int(3 * (unique_coins - 3)))
+    # Penalize spammy volume of mentions
+    if total_mentions > 20:
+        score -= min(20, int(1 * (total_mentions - 20)))
+    # Apply performance impact
+    score += int(min(25, perf_sum / max(1.0, unique_coins)))
+    score -= int(min(25, perf_penalty / max(1.0, unique_coins)))
+    # Clamp
+    score = max(1, min(100, int(round(score))))
+
+    label = human_label_from_score_twitter(score)
+
+    # Summaries
+    avg1h = sum(c.get("change1h", 0) for c in enriched) / max(1, unique_coins)
+    avg6h = sum(c.get("change6h", 0) for c in enriched) / max(1, unique_coins)
+    avg24h = sum(c.get("change24h", 0) for c in enriched) / max(1, unique_coins)
+    best = max(enriched, key=lambda c: max(c.get("change1h", 0), c.get("change6h", 0), c.get("change24h", 0)))
+    worst = min(enriched, key=lambda c: min(c.get("change1h", 0), c.get("change6h", 0), c.get("change24h", 0)))
+
+    return {
+        "handle": handle,
+        "score": score,
+        "label": label,
+        "metrics": {
+            "unique_coins": unique_coins,
+            "total_mentions": total_mentions,
+            "avg_change_1h": round(avg1h, 2),
+            "avg_change_6h": round(avg6h, 2),
+            "avg_change_24h": round(avg24h, 2),
+            "best_symbol": best.get("symbol"),
+            "best_change_max": round(max(best.get("change1h", 0), best.get("change6h", 0), best.get("change24h", 0)), 2),
+            "worst_symbol": worst.get("symbol"),
+            "worst_change_min": round(min(worst.get("change1h", 0), worst.get("change6h", 0), worst.get("change24h", 0)), 2),
+        },
+        "coins": enriched,
+    }
+
+
+@app.post("/grade_twitter")
+def grade_twitter_api():
+    data = request.get_json(silent=True) or {}
+    handle = (data.get("handle") or request.form.get("handle") or "").strip()
+    if not handle:
+        return jsonify({"error": "Please enter a Twitter handle (e.g., @name)."}), 400
+    logger.info("grade_twitter_api:request handle=%s", handle)
+    result = grade_twitter(handle)
+    status = 200 if not result.get("error") else 400
+    logger.info("grade_twitter_api:response handle=%s status=%s", handle, status)
     return jsonify(result), status
 
 
