@@ -9,6 +9,7 @@ import re
 from flask import Flask, render_template, request, jsonify
 import logging
 import requests
+from bs4 import BeautifulSoup  # type: ignore
 
 try:
     from solana.rpc.api import Client  # type: ignore
@@ -1169,6 +1170,51 @@ def _extract_handle(raw: str) -> str | None:
     return None
 
 
+def _twitter_fetch_from_nitter(handle: str, max_results: int = 50) -> List[Dict[str, Any]]:
+    instances = [
+        "https://nitter.net",
+        "https://nitter.poast.org",
+        "https://n.opnxng.com",
+        "https://nitter.privacydev.net",
+    ]
+    headers = {"User-Agent": "Mozilla/5.0"}
+    for base in instances:
+        try:
+            url = f"{base}/{handle}"
+            resp = requests.get(url, headers=headers, timeout=10)
+            if not resp.ok or not resp.text:
+                continue
+            soup = BeautifulSoup(resp.text, "html.parser")
+            tweets: List[Dict[str, Any]] = []
+            # Each tweet link looks like /{handle}/status/{id}
+            for a in soup.select(f'a[href^="/{handle}/status/"]'):
+                href = a.get('href') or ''
+                m = re.search(r"/status/(\d+)", href)
+                if not m:
+                    continue
+                tid = m.group(1)
+                # Try to get time from nearby <time> tag
+                dt_iso = None
+                time_tag = a.find_next('time') or a.find_previous('time')
+                if time_tag and time_tag.has_attr('datetime'):
+                    dt_iso = time_tag.get('datetime')
+                # Get enclosing tweet text
+                container = a.find_parent('div') or a.parent
+                text = ''
+                if container:
+                    # Look for typical content containers
+                    content = container.find(class_=re.compile(r"tweet-content|content|status-body"))
+                    text = (content.get_text(" ", strip=True) if content else container.get_text(" ", strip=True))
+                tweets.append({"id": tid, "text": text, "created_at": dt_iso})
+                if len(tweets) >= max_results:
+                    break
+            if tweets:
+                return tweets
+        except Exception:
+            continue
+    return []
+
+
 def _twitter_fetch_recent(handle: str, max_results: int = 100) -> List[Dict[str, Any]]:
     # Try Twitter API v2 if bearer provided
     bearer = os.environ.get("TWITTER_BEARER_TOKEN")
@@ -1202,24 +1248,10 @@ def _twitter_fetch_recent(handle: str, max_results: int = 100) -> List[Dict[str,
         except Exception:
             pass
 
-    # Fallback: fetch public mirror content through a text proxy to avoid heavy HTML
-    text_sources = [
-        f"https://r.jina.ai/http://nitter.net/{handle}",
-        f"https://r.jina.ai/http://x.com/{handle}",
-        f"https://r.jina.ai/http://twitter.com/{handle}",
-    ]
-    for url in text_sources:
-        try:
-            resp = requests.get(url, timeout=10)
-            if resp.ok and resp.text:
-                # We cannot reliably parse timestamps from this text proxy; return a few recent entries with unknown times
-                chunks = [c.strip() for c in resp.text.split("\n\n") if c.strip()]
-                out: List[Dict[str, Any]] = []
-                for c in chunks[:50]:
-                    out.append({"id": None, "text": c, "created_at": None})
-                return out
-        except Exception:
-            continue
+    # Fallback: parse Nitter HTML for ids, timestamps, and text
+    nitter = _twitter_fetch_from_nitter(handle, max_results=min(50, max_results))
+    if nitter:
+        return nitter
     return []
 
 
