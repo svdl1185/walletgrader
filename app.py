@@ -1243,7 +1243,12 @@ def _twitter_fetch_recent(handle: str, max_results: int = 100) -> List[Dict[str,
                     if r2.ok:
                         out: List[Dict[str, Any]] = []
                         data = r2.json()
-                        out.extend({"id": t.get("id"), "text": t.get("text", ""), "created_at": t.get("created_at")} for t in data.get("data", []) or [])
+                        out.extend({
+                            "id": t.get("id"),
+                            "text": t.get("text", ""),
+                            "created_at": t.get("created_at"),
+                            "entities": t.get("entities") or {},
+                        } for t in data.get("data", []) or [])
                         # Paginate
                         next_token = (data.get("meta") or {}).get("next_token")
                         started = time.time()
@@ -1261,7 +1266,12 @@ def _twitter_fetch_recent(handle: str, max_results: int = 100) -> List[Dict[str,
                             if not r3.ok:
                                 break
                             jd = r3.json()
-                            out.extend({"id": t.get("id"), "text": t.get("text", ""), "created_at": t.get("created_at")} for t in jd.get("data", []) or [])
+                            out.extend({
+                                "id": t.get("id"),
+                                "text": t.get("text", ""),
+                                "created_at": t.get("created_at"),
+                                "entities": t.get("entities") or {},
+                            } for t in jd.get("data", []) or [])
                             next_token = (jd.get("meta") or {}).get("next_token")
                         return out[:TWEET_SCAN_LIMIT]
         except Exception:
@@ -1324,6 +1334,25 @@ def _extract_coin_mentions_per_tweet(tweets: List[Dict[str, Any]]) -> List[Dict[
         text = tw.get("text") or ""
         ts = tw.get("created_at")
         tid = tw.get("id")
+        entities = tw.get("entities") or {}
+        # Prefer structured cashtags when available
+        symbols = []
+        try:
+            for sym in (entities.get("mentions") or []) + (entities.get("symbols") or []):
+                val = (sym.get("tag") or sym.get("username") or sym.get("text") or "").upper()
+                if val and val not in symbols and len(val) <= 15:
+                    symbols.append(val)
+        except Exception:
+            pass
+        for sym in symbols:
+            events.append({
+                "kind": "symbol",
+                "id": sym,
+                "text": text,
+                "created_at": ts,
+                "tweet_id": tid,
+                "source": "entity",
+            })
         # Cashtags symbols
         for m in re.finditer(r"\$([A-Za-z][A-Za-z0-9]{1,15})\b", text):
             sym = m.group(1).upper()
