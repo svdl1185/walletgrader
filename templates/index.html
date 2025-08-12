@@ -111,6 +111,9 @@
                 scoreName.textContent = String(s.result.label);
                 heurHold.textContent = `Hold profile: ${s.result.metrics.hold_profile}`;
                 heurActivity.textContent = `Activity profile: ${s.result.metrics.activity_profile}`;
+                if (s.partial) {
+                  console.log('Partial scan due to time budget; results approximate.');
+                }
               } else if (s.status === 'error') {
                 stopHoveringAndSet(1);
                 alert(s.error || 'Deep scan failed');

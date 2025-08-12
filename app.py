@@ -31,6 +31,12 @@ logger = app.logger
 # In-memory deep scan jobs store (ephemeral)
 SCANS: Dict[str, Dict[str, Any]] = {}
 
+# Scan budgets to keep response under ~15s on free RPC
+PAGE_LIMIT = int(os.environ.get("SCAN_PAGE_LIMIT", "200"))  # signatures per page
+MAX_PAGES = int(os.environ.get("SCAN_MAX_PAGES", "10"))    # hard cap on pages
+TIME_BUDGET_SEC = float(os.environ.get("SCAN_TIME_BUDGET_SEC", "12"))
+MAX_ANALYZE_TX = int(os.environ.get("SCAN_MAX_ANALYZE_TX", "220"))
+
 
 def get_solana_client() -> Client:
     rpc_url = os.environ.get("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
@@ -443,7 +449,16 @@ def _analyze_signatures_full(client: Client, public_key: Any, signatures_json: L
                 sleep_for = delay * (2 ** (attempts - 1)) + random.uniform(0, 0.25)
                 time.sleep(sleep_for)
 
-    for s in signatures_json:
+    # Respect a time budget while analyzing
+    started = time.time()
+    # Subsample to at most MAX_ANALYZE_TX transactions, evenly across history
+    if len(signatures_json) > MAX_ANALYZE_TX:
+        stride = max(1, len(signatures_json) // MAX_ANALYZE_TX)
+        iter_sigs = signatures_json[::stride]
+    else:
+        iter_sigs = signatures_json
+
+    for s in iter_sigs:
         sig = s.get("signature")
         if not sig:
             continue
@@ -498,6 +513,8 @@ def _analyze_signatures_full(client: Client, public_key: Any, signatures_json: L
                 pass
         except Exception:
             continue
+        if (time.time() - started) > TIME_BUDGET_SEC:
+            break
 
     # Churn
     sample_for_churn_sorted = sorted(sample_for_churn, key=lambda t: t[0])
@@ -688,7 +705,7 @@ def _run_deep_scan(scan_id: str, address: str) -> None:
     client = get_solana_client()
     all_sigs: List[Dict[str, Any]] = []
     before_sig: str | None = None
-    max_loops = 200  # safety cap
+    max_loops = min(200, MAX_PAGES)  # safety cap
     try:
         def call_with_retries(fn, *args, **kwargs):
             attempts = 0
@@ -704,9 +721,13 @@ def _run_deep_scan(scan_id: str, address: str) -> None:
                     logger.warning("deep_scan:rpc_retry attempt=%s delay=%.2fs err=%s", attempts, sleep_for, str(e)[:140])
                     time.sleep(sleep_for)
 
+        started = time.time()
         for loop_idx in range(max_loops):
+            if (time.time() - started) > TIME_BUDGET_SEC:
+                logger.info("deep_scan:time_budget_reached scan_id=%s collected=%s", scan_id, len(all_sigs))
+                break
             resp = call_with_retries(
-                client.get_signatures_for_address, public_key, before=before_sig, limit=500
+                client.get_signatures_for_address, public_key, before=before_sig, limit=PAGE_LIMIT
             )
             batch: List[Any] = []
             if hasattr(resp, "value"):
@@ -730,7 +751,7 @@ def _run_deep_scan(scan_id: str, address: str) -> None:
             logger.info("deep_scan:page scan_id=%s loop=%s batch=%s cumulative=%s before=%s", scan_id, loop_idx, len(batch), len(all_sigs), before_sig)
 
             # Avoid monopolizing RPC
-            time.sleep(0.15)
+            time.sleep(0.12)
 
         # Analyze
         logger.info("deep_scan:analyze_begin scan_id=%s total=%s", scan_id, len(all_sigs))
@@ -741,6 +762,7 @@ def _run_deep_scan(scan_id: str, address: str) -> None:
             "progress": 100,
             "total": len(all_sigs),
             "result": result,
+            "partial": (time.time() - started) > TIME_BUDGET_SEC,
             "finished_at": time.time(),
         })
         logger.info("deep_scan:completed scan_id=%s score=%s", scan_id, result.get("score"))
