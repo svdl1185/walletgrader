@@ -7,6 +7,7 @@ import time
 import uuid
 
 from flask import Flask, render_template, request, jsonify
+import logging
 
 try:
     from solana.rpc.api import Client  # type: ignore
@@ -23,6 +24,8 @@ except Exception:  # pragma: no cover
 
 
 app = Flask(__name__)
+logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
+logger = app.logger
 
 # In-memory deep scan jobs store (ephemeral)
 SCANS: Dict[str, Dict[str, Any]] = {}
@@ -51,6 +54,7 @@ def human_label_from_score(score: int) -> str:
     return "Rug Victim"
 
 def grade_wallet(address: str) -> Dict[str, Any]:
+    logger.info("grade_wallet:start address=%s", address)
     if Client is None or PublicKey is None:
         return {
             "error": "Dependencies not installed. Please install requirements first.",
@@ -62,6 +66,7 @@ def grade_wallet(address: str) -> Dict[str, Any]:
         else:
             public_key = PublicKey(address)
     except Exception:
+        logger.warning("grade_wallet:invalid_address address=%s", address)
         return {"error": "Invalid Solana address."}
 
     client = get_solana_client()
@@ -77,6 +82,7 @@ def grade_wallet(address: str) -> Dict[str, Any]:
             if isinstance(balance_resp, dict) and balance_resp.get("result"):
                 balance_lamports = balance_resp["result"].get("value", 0) or 0
     except Exception:
+        logger.exception("grade_wallet:balance_fetch_failed address=%s", address)
         balance_lamports = 0
     sol_balance = balance_lamports / 1_000_000_000
 
@@ -95,6 +101,7 @@ def grade_wallet(address: str) -> Dict[str, Any]:
         else:
             signatures_json = signatures_resp.get("result", []) if isinstance(signatures_resp, dict) else []
     except Exception:
+        logger.exception("grade_wallet:signatures_fetch_failed address=%s", address)
         signatures_json = []
     tx_count = len(signatures_json)
 
@@ -183,6 +190,7 @@ def grade_wallet(address: str) -> Dict[str, Any]:
             except Exception:
                 pass
         except Exception:
+            logger.exception("grade_wallet:tx_fetch_failed sig=%s address=%s", sig, address)
             continue
 
     # Helper: compute median of a list of numbers
@@ -361,7 +369,7 @@ def grade_wallet(address: str) -> Dict[str, Any]:
     else:
         activity_profile = "overactive"
 
-    return {
+    result_obj = {
         "address": str(public_key),
         "score": score,
         "label": label,
@@ -380,6 +388,8 @@ def grade_wallet(address: str) -> Dict[str, Any]:
             "win_rate": win_rate,
         },
     }
+    logger.info("grade_wallet:done address=%s score=%s", address, score)
+    return result_obj
 
 
 def _analyze_signatures_full(client: Client, public_key: Any, signatures_json: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -751,8 +761,10 @@ def grade_api():
     address = (data.get("address") or request.form.get("address") or "").strip()
     if not address:
         return jsonify({"error": "Please enter a Solana wallet address."}), 400
+    logger.info("grade_api:request address=%s", address)
     result = grade_wallet(address)
     status = 200 if not result.get("error") else 400
+    logger.info("grade_api:response address=%s status=%s", address, status)
     return jsonify(result), status
 
 

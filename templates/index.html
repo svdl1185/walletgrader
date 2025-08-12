@@ -10,14 +10,13 @@
     <main class="container">
       <header class="header">
         <h1>Wallet Grader</h1>
-        <p class="subtitle">Enter a Solana address to run a deep scan and compute your score.</p>
+        <p class="subtitle">Enter a Solana address to be graded based on memecoin trading proficiency.</p>
       </header>
 
       <form method="post" class="form" id="grade-form">
-        <label for="address">Solana wallet address</label>
         <div class="row">
           <input type="text" id="address" name="address" placeholder="e.g. 4Nd1m7..." value="" autofocus />
-          <button type="submit">Deep scan</button>
+          <button type="submit">Grade</button>
         </div>
         {% if error %}
         <div class="alert error">{{ error }}</div>
