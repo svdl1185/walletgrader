@@ -43,6 +43,15 @@ DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens/"
 BIRDEYE_HISTORY = "https://public-api.birdeye.so/defi/history_price"
 YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/"
 
+# Routing hints for well-known tickers to avoid mapping to random on-chain tokens
+YAHOO_STOCKS: Set[str] = {
+    "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "NVDA", "AMD", "INTC", "NFLX",
+}
+YAHOO_CRYPTO: Set[str] = {
+    "BTC", "ETH", "LINK", "SOL", "BNB", "XRP", "ADA", "DOGE", "LTC", "BCH", "AVAX",
+    "MATIC", "DOT", "ATOM", "OP", "ARB", "NEAR", "APT", "SUI", "SEI", "TIA",
+}
+
 # Single-scan tuning knobs (set via env for your RPC tier)
 # Defaults tuned to stay under the frontend's 30s timeout; override via env for deeper scans
 PAGE_LIMIT = int(os.environ.get("SCAN_PAGE_LIMIT", "1000"))  # signatures per page
@@ -1441,10 +1450,6 @@ def _dexscreener_lookup(ident: str, kind: str) -> Dict[str, Any] | None:
         pairs = data.get("pairs") or data.get("pairsByDexId") or data.get("pairs")
         if not pairs:
             return None
-        # Filter strictly to Solana
-        pairs = [p for p in pairs if p.get("chainId") in ("solana", "SOLANA", "solana-mainnet")]
-        if not pairs:
-            return None
         # If looking up by symbol, require exact symbol match to avoid false matches (e.g., $AMD stock)
         if kind != "address":
             pairs_exact = []
@@ -1456,7 +1461,7 @@ def _dexscreener_lookup(ident: str, kind: str) -> Dict[str, Any] | None:
                 pairs = pairs_exact
             else:
                 return None
-        # Prefer highest liquidity among remaining
+        # Prefer highest liquidity among remaining, regardless of chain (all chains allowed)
         def _rank(p):
             liq = float((p.get("liquidity", {}) or {}).get("usd") or p.get("liquidity") or 0)
             return liq
@@ -1653,10 +1658,19 @@ def grade_twitter(handle_or_url: str) -> Dict[str, Any]:
 
     enriched: List[Dict[str, Any]] = []
     for ident, evs in list(calls_by_ident.items())[:60]:
-        info = _dexscreener_lookup(ident, evs[0].get("kind", "symbol"))
+        info = None
+        # Route well-known tickers first
+        if evs[0].get("kind") == "symbol":
+            up = ident.upper()
+            if up in YAHOO_STOCKS or up in YAHOO_CRYPTO:
+                info = None  # force Yahoo for these symbols
+            else:
+                info = _dexscreener_lookup(ident, "symbol")
+        else:
+            info = _dexscreener_lookup(ident, evs[0].get("kind", "symbol"))
         # For symbols that aren't Solana tokens, also attempt Yahoo Finance series
         yahoo_long = None
-        if not info and evs[0].get("kind") == "symbol":
+        if (not info) and evs[0].get("kind") == "symbol":
             # Try Yahoo only if the symbol looks like a stock/crypto ticker
             for ev in evs[:2]:
                 if ev.get("created_at"):
