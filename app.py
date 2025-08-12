@@ -41,6 +41,7 @@ STABLE_MINTS: Set[str] = {
 DEXSCREENER_SEARCH = "https://api.dexscreener.com/latest/dex/search?q="
 DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens/"
 BIRDEYE_HISTORY = "https://public-api.birdeye.so/defi/history_price"
+YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/"
 
 # Single-scan tuning knobs (set via env for your RPC tier)
 # Defaults tuned to stay under the frontend's 30s timeout; override via env for deeper scans
@@ -1213,6 +1214,10 @@ def _twitter_fetch_from_nitter(handle: str, max_results: int = 50) -> List[Dict[
     return []
 
 
+TWEET_SCAN_LIMIT = int(os.environ.get("TWEET_SCAN_LIMIT", "800"))
+TWEET_TIME_BUDGET_SEC = float(os.environ.get("TWEET_TIME_BUDGET_SEC", "12"))
+
+
 def _twitter_fetch_recent(handle: str, max_results: int = 100) -> List[Dict[str, Any]]:
     # Try Twitter API v2 if bearer provided
     bearer = os.environ.get("TWITTER_BEARER_TOKEN")
@@ -1237,12 +1242,28 @@ def _twitter_fetch_recent(handle: str, max_results: int = 100) -> List[Dict[str,
                     )
                     if r2.ok:
                         out: List[Dict[str, Any]] = []
-                        for t in r2.json().get("data", []) or []:
-                            txt = t.get("text", "")
-                            ts = t.get("created_at")
-                            tid = t.get("id")
-                            out.append({"id": tid, "text": txt, "created_at": ts})
-                        return out
+                        data = r2.json()
+                        out.extend({"id": t.get("id"), "text": t.get("text", ""), "created_at": t.get("created_at")} for t in data.get("data", []) or [])
+                        # Paginate
+                        next_token = (data.get("meta") or {}).get("next_token")
+                        started = time.time()
+                        while next_token and len(out) < TWEET_SCAN_LIMIT and (time.time() - started) < TWEET_TIME_BUDGET_SEC:
+                            r3 = requests.get(
+                                f"https://api.twitter.com/2/users/{uid}/tweets",
+                                params={
+                                    "max_results": "100",
+                                    "exclude": "retweets,replies",
+                                    "tweet.fields": "created_at,entities",
+                                    "pagination_token": next_token,
+                                },
+                                headers={"Authorization": f"Bearer {bearer}"}, timeout=12,
+                            )
+                            if not r3.ok:
+                                break
+                            jd = r3.json()
+                            out.extend({"id": t.get("id"), "text": t.get("text", ""), "created_at": t.get("created_at")} for t in jd.get("data", []) or [])
+                            next_token = (jd.get("meta") or {}).get("next_token")
+                        return out[:TWEET_SCAN_LIMIT]
         except Exception:
             pass
 
@@ -1456,9 +1477,7 @@ def _birdeye_history_returns(address: str, call_dt_iso: str) -> Dict[str, float]
     except Exception:
         return None
     horizons = {"1h": 3600, "24h": 86400, "7d": 7*86400, "30d": 30*86400}
-    result: Dict[str, float] = {}
     try:
-        # Pull 30d window around call in 1h candles
         params = {
             "address": address,
             "time_from": str(call_ts - 3600),
@@ -1470,10 +1489,8 @@ def _birdeye_history_returns(address: str, call_dt_iso: str) -> Dict[str, float]
             return None
         data = r.json()
         prices = data.get("data", {}).get("items") or data.get("data", {}).get("price") or []
-        # Expect items like {"unixTime": 1700000000, "value": 0.001}
         if not prices:
             return None
-        # Find price at/just after call
         def _nearest(ts_target: int):
             nearest = None
             best_dt = 10**12
@@ -1490,6 +1507,7 @@ def _birdeye_history_returns(address: str, call_dt_iso: str) -> Dict[str, float]
         p0 = float(base.get("value") or base.get("price") or 0)
         if p0 <= 0:
             return None
+        result: Dict[str, float] = {}
         for k, delta in horizons.items():
             tgt = _nearest(call_ts + delta)
             if tgt:
@@ -1499,6 +1517,57 @@ def _birdeye_history_returns(address: str, call_dt_iso: str) -> Dict[str, float]
         return result if result else None
     except Exception:
         return None
+def _yahoo_history_returns(symbol: str, call_dt_iso: str) -> Dict[str, float] | None:
+    if not symbol or not call_dt_iso:
+        return None
+    try:
+        call_ts = int(datetime.fromisoformat(call_dt_iso.replace("Z", "+00:00")).timestamp())
+    except Exception:
+        return None
+    candidates = [symbol.upper(), f"{symbol.upper()}-USD"]
+    for sym in candidates:
+        try:
+            r = requests.get(
+                YAHOO_CHART + sym,
+                params={"range": "35d", "interval": "1h"}, timeout=10,
+            )
+            if not r.ok:
+                continue
+            data = r.json().get("chart", {}).get("result", [None])[0]
+            if not data:
+                continue
+            ts = data.get("timestamp") or []
+            closes = ((data.get("indicators", {}) or {}).get("quote", [{}])[0]).get("close") or []
+            if not ts or not closes or len(ts) != len(closes):
+                continue
+            # Build list of (timestamp, close)
+            series = [(int(t), float(c)) for t, c in zip(ts, closes) if c is not None]
+            if not series:
+                continue
+            def nearest(target: int):
+                best = None
+                best_dt = 10**12
+                for t, c in series:
+                    dt = abs(t - target)
+                    if dt < best_dt:
+                        best_dt = dt
+                        best = (t, c)
+                return best
+            base = nearest(call_ts)
+            if not base or base[1] <= 0:
+                continue
+            p0 = base[1]
+            horizons = {"1h": 3600, "24h": 86400, "7d": 7*86400, "30d": 30*86400}
+            out: Dict[str, float] = {}
+            for k, delta in horizons.items():
+                nxt = nearest(call_ts + delta)
+                if nxt and nxt[1] > 0:
+                    out[k] = (nxt[1] / p0 - 1.0) * 100.0
+            if out:
+                return out
+        except Exception:
+            continue
+    return None
 
 
 def grade_twitter(handle_or_url: str) -> Dict[str, Any]:
@@ -1550,20 +1619,35 @@ def grade_twitter(handle_or_url: str) -> Dict[str, Any]:
         calls_by_ident.setdefault(ident, []).append(ev)
 
     enriched: List[Dict[str, Any]] = []
-    for ident, evs in list(calls_by_ident.items())[:40]:
+    for ident, evs in list(calls_by_ident.items())[:60]:
         info = _dexscreener_lookup(ident, evs[0].get("kind", "symbol"))
-        if not info:
+        # For symbols that aren't Solana tokens, also attempt Yahoo Finance series
+        yahoo_long = None
+        if not info and evs[0].get("kind") == "symbol":
+            # Try Yahoo only if the symbol looks like a stock/crypto ticker
+            for ev in evs[:2]:
+                if ev.get("created_at"):
+                    yahoo_long = _yahoo_history_returns(ident, ev.get("created_at"))
+                    if yahoo_long:
+                        break
+        if not info and not yahoo_long:
             continue
         # Compute short-term approximations per call
         per_call: List[Dict[str, Any]] = []
-        for ev in evs[:8]:  # cap calls per coin for perf
+        for ev in evs[:8]:  # cap calls per asset for perf
             hs = _hours_since(ev.get("created_at"))
-            approx = _approx_return_since_call_using_dex({
-                "h1": info.get("change1h", 0),
-                "h6": info.get("change6h", 0),
-                "h24": info.get("change24h", 0),
-            }, hs)
-            longterm = _birdeye_history_returns(info.get("address"), ev.get("created_at")) if ev.get("created_at") else None
+            approx = None
+            longterm = None
+            if info:
+                approx = _approx_return_since_call_using_dex({
+                    "h1": info.get("change1h", 0),
+                    "h6": info.get("change6h", 0),
+                    "h24": info.get("change24h", 0),
+                }, hs)
+                longterm = _birdeye_history_returns(info.get("address"), ev.get("created_at")) if ev.get("created_at") else None
+            if yahoo_long and ev.get("created_at"):
+                # Prefer Yahoo long horizons for non-DEX assets
+                longterm = yahoo_long
             per_call.append({
                 "created_at": ev.get("created_at"),
                 "source": ev.get("source"),
@@ -1574,12 +1658,12 @@ def grade_twitter(handle_or_url: str) -> Dict[str, Any]:
         enriched.append({
             "id": ident,
             "kind": evs[0].get("kind", "symbol"),
-            "symbol": info.get("symbol"),
-            "address": info.get("address"),
-            "liquidity_usd": info.get("liquidity_usd"),
-            "change1h": info.get("change1h"),
-            "change6h": info.get("change6h"),
-            "change24h": info.get("change24h"),
+            "symbol": (info or {}).get("symbol") or ident,
+            "address": (info or {}).get("address"),
+            "liquidity_usd": (info or {}).get("liquidity_usd"),
+            "change1h": (info or {}).get("change1h"),
+            "change6h": (info or {}).get("change6h"),
+            "change24h": (info or {}).get("change24h"),
             "calls": per_call,
         })
 
@@ -1650,9 +1734,9 @@ def grade_twitter(handle_or_url: str) -> Dict[str, Any]:
     label = human_label_from_score_twitter(score)
 
     # Summaries
-    avg1h = sum(c.get("change1h", 0) for c in enriched) / max(1, unique_coins)
-    avg6h = sum(c.get("change6h", 0) for c in enriched) / max(1, unique_coins)
-    avg24h = sum(c.get("change24h", 0) for c in enriched) / max(1, unique_coins)
+    avg1h = sum(c.get("change1h", 0) or 0 for c in enriched) / max(1, unique_coins)
+    avg6h = sum(c.get("change6h", 0) or 0 for c in enriched) / max(1, unique_coins)
+    avg24h = sum(c.get("change24h", 0) or 0 for c in enriched) / max(1, unique_coins)
     best = max(enriched, key=lambda c: max(c.get("change1h", 0), c.get("change6h", 0), c.get("change24h", 0)))
     worst = min(enriched, key=lambda c: min(c.get("change1h", 0), c.get("change6h", 0), c.get("change24h", 0)))
 
