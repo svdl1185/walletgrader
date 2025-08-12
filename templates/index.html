@@ -52,7 +52,7 @@
         </ul>
       </section>
 
-      <footer></footer>
+      
     </main>
     <script>
       (function() {
@@ -68,6 +68,12 @@
           const clamped = Math.max(0, Math.min(100, pct));
           marker.style.setProperty('--marker-position', String(clamped));
           fill.style.setProperty('--fill-percentage', String(clamped));
+          // Map percentage → hue so only the last ~20 points are green
+          // 0–80%: red (0) → yellow (50). 80–100%: yellow (50) → green (120)
+          const hue = clamped < 80
+            ? 0 + (50 * (clamped / 80))
+            : 50 + (70 * ((clamped - 80) / 20));
+          fill.style.setProperty('--bar-hue', String(Math.round(hue)));
         }
 
         let hoverRAF = 0;
@@ -75,7 +81,7 @@
           let position = Math.floor(Math.random() * 100);
           let direction = Math.random() > 0.5 ? 1 : -1;
           function step() {
-            position += direction * (3 + Math.random() * 8);
+            position += direction * (1 + Math.random() * 3); // slower hover
             if (position >= 100) { position = 100; direction = -1; }
             if (position <= 0) { position = 0; direction = 1; }
             setPosition(position);

@@ -91,10 +91,11 @@ button:hover { filter: brightness(1.05); }
 .bar-fill {
   position: absolute; inset: 0 auto 0 0;
   width: calc(var(--fill-percentage) * 1%);
-  background: linear-gradient(90deg, #ff6b6b, #ffd66b 40%, #7dff7a 100%);
-  transition: width 700ms cubic-bezier(.22,.61,.36,1);
+  /* Dynamic, solid color set by JS so green only appears near the end */
+  background: hsl(var(--bar-hue, 0), 90%, 55%);
+  transition: width 800ms cubic-bezier(.22,.61,.36,1), background-color 200ms linear;
 }
-.bar-fill.settle { transition: width 600ms cubic-bezier(.22,.61,.36,1.1); }
+.bar-fill.settle { transition: width 650ms cubic-bezier(.22,.61,.36,1.1), background-color 200ms linear; }
 
 .bar-marker {
   --x: calc(var(--marker-position) * 1%);
@@ -103,9 +104,9 @@ button:hover { filter: brightness(1.05); }
   width: 10px; height: 24px; border-radius: 4px;
   background: var(--text);
   box-shadow: 0 0 0 2px rgba(255,255,255,0.15);
-  transition: left 700ms cubic-bezier(.22,.61,.36,1);
+  transition: left 800ms cubic-bezier(.22,.61,.36,1);
 }
-.bar-marker.settle { transition: left 600ms cubic-bezier(.22,.61,.36,1.1); }
+.bar-marker.settle { transition: left 650ms cubic-bezier(.22,.61,.36,1.1); }
 .label { font-weight: 700; letter-spacing: 0.6px; }
 .address { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; color: var(--subtext); font-size: 12px; word-break: break-all; text-align: center; }
 
@@ -113,8 +114,7 @@ button:hover { filter: brightness(1.05); }
 .metrics ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
 .metrics li { padding: 10px; border: 1px solid var(--border); border-radius: 10px; background: #0d1320; }
 
-footer { margin-top: 24px; text-align: center; color: var(--subtext); }
-.footnote { font-size: 12px; }
+/* Remove footer spacing entirely */
 
 @media (max-width: 760px) { .results { grid-template-columns: 1fr; } }
 
