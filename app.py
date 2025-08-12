@@ -1200,19 +1200,10 @@ def _twitter_fetch_from_nitter(handle: str, max_results: int = 50) -> List[Dict[
                 if not m:
                     continue
                 tid = m.group(1)
-                # Try to get time from nearby <time> tag
-                dt_iso = None
-                time_tag = a.find_next('time') or a.find_previous('time')
-                if time_tag and time_tag.has_attr('datetime'):
-                    dt_iso = time_tag.get('datetime')
-                # Get enclosing tweet text
-                container = a.find_parent('div') or a.parent
-                text = ''
-                if container:
-                    # Look for typical content containers
-                    content = container.find(class_=re.compile(r"tweet-content|content|status-body"))
-                    text = (content.get_text(" ", strip=True) if content else container.get_text(" ", strip=True))
-                tweets.append({"id": tid, "text": text, "created_at": dt_iso})
+                # Fetch the tweet page to reliably get text + timestamp
+                item = _fetch_single_tweet(tid, handle_path)
+                if item:
+                    tweets.append(item)
                 if len(tweets) >= max_results:
                     break
             if tweets:
@@ -1323,6 +1314,17 @@ def _extract_coin_mentions_per_tweet(tweets: List[Dict[str, Any]]) -> List[Dict[
                 "tweet_id": tid,
                 "source": "cashtag",
             })
+        # Hashtags symbols (#TICKER)
+        for m in re.finditer(r"#([A-Za-z][A-Za-z0-9]{1,15})\b", text):
+            sym = m.group(1).upper()
+            events.append({
+                "kind": "symbol",
+                "id": sym,
+                "text": text,
+                "created_at": ts,
+                "tweet_id": tid,
+                "source": "hashtag",
+            })
         # Solana base58 mints
         for m in re.finditer(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b", text):
             addr = m.group(0)
@@ -1344,6 +1346,28 @@ def _extract_coin_mentions_per_tweet(tweets: List[Dict[str, Any]]) -> List[Dict[
                 "created_at": ts,
                 "tweet_id": tid,
                 "source": "pumpfun",
+            })
+        # Dexscreener links: either token or pair address
+        for m in re.finditer(r"dexscreener\.com/(?:[a-z\-]+/)?(?:token/)?([1-9A-HJ-NP-Za-km-z]{32,44})", text, re.IGNORECASE):
+            ident = m.group(1)
+            events.append({
+                "kind": "pair",
+                "id": ident,
+                "text": text,
+                "created_at": ts,
+                "tweet_id": tid,
+                "source": "dexscreener",
+            })
+        # Birdeye token links
+        for m in re.finditer(r"birdeye\.so/(?:token|symbol)/([1-9A-HJ-NP-Za-km-z]{32,44})", text, re.IGNORECASE):
+            ident = m.group(1)
+            events.append({
+                "kind": "address",
+                "id": ident,
+                "text": text,
+                "created_at": ts,
+                "tweet_id": tid,
+                "source": "birdeye",
             })
     return events
 
