@@ -108,7 +108,7 @@
           startHovering();
           try {
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 30000);
+            const timeoutId = setTimeout(() => controller.abort(), 60000);
             const resp = await fetch('/grade', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ address }), signal: controller.signal });
             clearTimeout(timeoutId);
             let data = {};

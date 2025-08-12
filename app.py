@@ -35,11 +35,11 @@ STABLE_MINTS: Set[str] = {
 }
 
 # Single-scan tuning knobs (set via env for your RPC tier)
-# Paid RPC defaults tuned for < ~1 minute wall time on typical wallets
+# Defaults tuned to stay under the frontend's 30s timeout; override via env for deeper scans
 PAGE_LIMIT = int(os.environ.get("SCAN_PAGE_LIMIT", "1000"))  # signatures per page
-MAX_PAGES = int(os.environ.get("SCAN_MAX_PAGES", "20"))      # pages of signatures
-TIME_BUDGET_SEC = float(os.environ.get("SCAN_TIME_BUDGET_SEC", "55"))
-MAX_ANALYZE_TX = int(os.environ.get("SCAN_MAX_ANALYZE_TX", "1000"))
+MAX_PAGES = int(os.environ.get("SCAN_MAX_PAGES", "8"))       # pages of signatures
+TIME_BUDGET_SEC = float(os.environ.get("SCAN_TIME_BUDGET_SEC", "25"))
+MAX_ANALYZE_TX = int(os.environ.get("SCAN_MAX_ANALYZE_TX", "250"))
 
 # USD filter for small moves
 SOL_PRICE_USD = float(os.environ.get("SOL_PRICE_USD", "150"))
