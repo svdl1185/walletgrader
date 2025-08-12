@@ -1,0 +1,6 @@
+Flask>=3.0,<4.0
+gunicorn>=21.2,<22.0
+solana>=0.30,<0.36
+python-dotenv>=1.0,<2.0
+requests>=2.31,<3.0
+

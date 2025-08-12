@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Solana Wallet Grader</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header>
+        <h1>Solana Wallet Grader</h1>
+        <p class="subtitle">Paste your wallet address to get a vibe-check score from 1–100.</p>
+      </header>
+
+      <section class="card">
+        <form method="post" class="form">
+          <label for="address">Solana wallet address</label>
+          <div class="row">
+            <input type="text" id="address" name="address" placeholder="e.g. 4Nd1m7..." value="" autofocus />
+            <button type="submit">Grade</button>
+          </div>
+          {% if error %}
+          <div class="alert error">{{ error }}</div>
+          {% endif %}
+        </form>
+      </section>
+
+      {% if result and not error %}
+      <section class="card results">
+        <div class="score-wrap">
+          <div class="score-badge" data-score="{{ result.score }}">
+            <div class="score">{{ result.score }}</div>
+          </div>
+          <div class="label">{{ result.label }}</div>
+          <div class="address">{{ result.address }}</div>
+        </div>
+
+        <div class="metrics">
+          <h3>Metrics</h3>
+          <ul>
+            <li><strong>SOL balance</strong>: {{ '%.4f'|format(result.metrics.sol_balance) }} SOL</li>
+            <li><strong>Recent transactions</strong>: {{ result.metrics.recent_tx_count }}</li>
+            <li><strong>Account age</strong>: {{ result.metrics.account_age_days }} days</li>
+            <li><strong>Unique programs (sampled)</strong>: {{ result.metrics.unique_programs_sampled }}</li>
+            <li><strong>DeFi interactions</strong>:
+              {% if result.metrics.defi_program_hits and result.metrics.defi_program_hits|length > 0 %}
+                {{ result.metrics.defi_program_hits | join(', ') }}
+              {% else %}
+                None detected in sample
+              {% endif %}
+            </li>
+          </ul>
+        </div>
+      </section>
+      {% endif %}
+
+      <footer>
+        <p class="footnote">
+          This is a heuristic score. Not financial advice. Data fetched from Solana RPC.
+        </p>
+      </footer>
+    </main>
+    <script>
+      (function() {
+        const badge = document.querySelector('.score-badge');
+        if (!badge) return;
+        const score = parseInt(badge.getAttribute('data-score') || '0', 10);
+        const hue = Math.max(0, Math.min(120, Math.round((score / 100) * 120))); // red→green
+        badge.style.setProperty('--score-hue', hue);
+      })();
+    </script>
+  </body>
+  </html>
+
+
