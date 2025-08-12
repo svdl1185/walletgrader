@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Set, Tuple
 import threading
 import time
 import uuid
+import random
 
 from flask import Flask, render_template, request, jsonify
 import logging
@@ -429,12 +430,25 @@ def _analyze_signatures_full(client: Client, public_key: Any, signatures_json: L
     # Program overlap churn
     sample_for_churn = []
     trade_deltas: List[Tuple[int, float]] = []
+    def call_with_retries(fn, *args, **kwargs):
+        attempts = 0
+        delay = 0.5
+        while True:
+            try:
+                return fn(*args, **kwargs)
+            except Exception as e:
+                attempts += 1
+                if attempts >= 6:
+                    raise
+                sleep_for = delay * (2 ** (attempts - 1)) + random.uniform(0, 0.25)
+                time.sleep(sleep_for)
+
     for s in signatures_json:
         sig = s.get("signature")
         if not sig:
             continue
         try:
-            tx_resp = client.get_transaction(sig, max_supported_transaction_version=0)
+            tx_resp = call_with_retries(client.get_transaction, sig, max_supported_transaction_version=0)
             tx_json = None
             if hasattr(tx_resp, "to_json"):
                 import json as _json
@@ -676,8 +690,24 @@ def _run_deep_scan(scan_id: str, address: str) -> None:
     before_sig: str | None = None
     max_loops = 200  # safety cap
     try:
+        def call_with_retries(fn, *args, **kwargs):
+            attempts = 0
+            delay = 0.5
+            while True:
+                try:
+                    return fn(*args, **kwargs)
+                except Exception as e:  # backoff on RPC limits / transient errors
+                    attempts += 1
+                    if attempts >= 6:
+                        raise
+                    sleep_for = delay * (2 ** (attempts - 1)) + random.uniform(0, 0.25)
+                    logger.warning("deep_scan:rpc_retry attempt=%s delay=%.2fs err=%s", attempts, sleep_for, str(e)[:140])
+                    time.sleep(sleep_for)
+
         for loop_idx in range(max_loops):
-            resp = client.get_signatures_for_address(public_key, before=before_sig, limit=500)
+            resp = call_with_retries(
+                client.get_signatures_for_address, public_key, before=before_sig, limit=500
+            )
             batch: List[Any] = []
             if hasattr(resp, "value"):
                 batch = getattr(resp, "value", [])
@@ -700,10 +730,11 @@ def _run_deep_scan(scan_id: str, address: str) -> None:
             logger.info("deep_scan:page scan_id=%s loop=%s batch=%s cumulative=%s before=%s", scan_id, loop_idx, len(batch), len(all_sigs), before_sig)
 
             # Avoid monopolizing RPC
-            time.sleep(0.1)
+            time.sleep(0.15)
 
         # Analyze
         logger.info("deep_scan:analyze_begin scan_id=%s total=%s", scan_id, len(all_sigs))
+        # Wrap per-tx fetches with retry & rate limit inside analyzer
         result = _analyze_signatures_full(client, public_key, all_sigs)
         SCANS[scan_id].update({
             "status": "completed",
