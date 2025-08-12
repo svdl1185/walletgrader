@@ -28,6 +28,12 @@
 
       <section class="card results" id="results" style="display:none;">
         <div class="score-wrap">
+          <div class="score-line" id="score-line" style="display:none;">
+            <div class="score-label"><span id="score-value"></span> — <span id="score-name"></span></div>
+            <div class="score-heuristics">
+              <span id="heur-hold"></span> • <span id="heur-activity"></span>
+            </div>
+          </div>
           <div class="score-bar" id="score-bar" data-final-score="0">
             <div class="bar-header">
               <span>1</span>
@@ -59,6 +65,11 @@
         const form = document.getElementById('grade-form');
         const results = document.getElementById('results');
         const bar = document.getElementById('score-bar');
+        const scoreLine = document.getElementById('score-line');
+        const scoreValue = document.getElementById('score-value');
+        const scoreName = document.getElementById('score-name');
+        const heurHold = document.getElementById('heur-hold');
+        const heurActivity = document.getElementById('heur-activity');
         if (!form || !results || !bar) return;
         const track = bar.querySelector('.bar-track');
         const marker = bar.querySelector('.bar-marker');
@@ -78,10 +89,17 @@
 
         let hoverRAF = 0;
         function startHovering() {
-          let position = Math.floor(Math.random() * 100);
+          // Start anywhere, occasionally bounce to extremes to feel more random
+          let position = Math.floor(Math.random() * 101);
           let direction = Math.random() > 0.5 ? 1 : -1;
           function step() {
-            position += direction * (1 + Math.random() * 3); // slower hover
+            // Occasionally jump target toward edges
+            if (Math.random() < 0.03) {
+              direction = Math.random() < 0.5 ? -1 : 1;
+              position += direction * (10 + Math.random() * 15);
+            } else {
+              position += direction * (0.6 + Math.random() * 2.2);
+            }
             if (position >= 100) { position = 100; direction = -1; }
             if (position <= 0) { position = 0; direction = 1; }
             setPosition(position);
@@ -124,6 +142,15 @@
             }
             // Settle bar at the final score only
             stopHoveringAndSet(Math.max(1, Math.min(100, parseInt(data.score, 10) || 0)));
+
+            // Reveal score line and heuristics
+            if (scoreLine) {
+              scoreLine.style.display = 'block';
+              scoreValue.textContent = String(data.score);
+              scoreName.textContent = String(data.label);
+              heurHold.textContent = `Hold profile: ${data.metrics.hold_profile}`;
+              heurActivity.textContent = `Activity profile: ${data.metrics.activity_profile}`;
+            }
           } catch (err) {
             stopHoveringAndSet(1);
             alert('Network error');

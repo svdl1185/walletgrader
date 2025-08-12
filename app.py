@@ -261,8 +261,10 @@ def grade_wallet(address: str) -> Dict[str, Any]:
         hold_profile = "swing holds"
     elif median_inter_tx_hours >= 1:
         hold_profile = "short holds"
-    else:
+    elif median_inter_tx_hours >= 0.25:
         hold_profile = "scalping"
+    else:
+        hold_profile = "high-speed trader"
 
     if tx_count <= 15:
         activity_profile = "low"
