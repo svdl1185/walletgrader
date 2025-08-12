@@ -1123,15 +1123,15 @@ def index():
 
     if request.method == "POST":
         # Legacy fallback: still render page if form posts without JS
-        address = request.form.get("address", "").strip()
-        if not address:
-            error = "Please enter a Solana wallet address."
+        raw = (request.form.get("handle", "") or request.form.get("address", "")).strip()
+        if not raw:
+            error = "Please enter a Twitter handle (e.g., @name)."
         else:
             # If the input looks like a twitter handle, route to twitter grading for SSR fallback
-            if address.startswith("@") or ("twitter.com/" in address) or ("x.com/" in address):
-                result = grade_twitter(address)
+            if raw.startswith("@") or ("twitter.com/" in raw) or ("x.com/" in raw):
+                result = grade_twitter(raw)
             else:
-                result = grade_wallet(address)
+                result = grade_wallet(raw)
             error = result.get("error") if isinstance(result, dict) and result.get("error") else None
 
     return render_template("index.html", result=result, error=error)

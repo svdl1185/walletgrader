@@ -41,6 +41,7 @@
           </div>
         </div>
         <div class="score-meta" id="score-meta" style="display:none; text-align:center; color:#666; font-size:13px; margin-top:6px;"></div>
+        <div id="calls-list" style="display:none; margin-top:12px;"></div>
       </section>
 
       <div class="foot-link"><a href="https://github.com/svdl1185/walletgrader" target="_blank" rel="noopener noreferrer">Github</a></div>
@@ -124,8 +125,41 @@
             scoreName.textContent = String(data.label);
             heurHold.textContent = `Unique coins: ${data.metrics.unique_coins}`;
             heurActivity.textContent = `Total calls: ${data.metrics.total_calls}`;
-            scoreMeta.style.display = 'block';
-            scoreMeta.textContent = `Avg 1h: ${data.metrics.avg_change_1h ?? 0}% | Avg 6h: ${data.metrics.avg_change_6h ?? 0}% | Avg 24h: ${data.metrics.avg_change_24h ?? 0}% | Hit rate (~24h): ${(data.metrics.hit_rate_approx_24h ?? 0) * 100}%`;
+            scoreMeta.style.display = 'none';
+            scoreMeta.textContent = '';
+
+            // Build calls list
+            const callsList = document.getElementById('calls-list');
+            if (Array.isArray(data.coins)) {
+              const items = [];
+              for (const c of data.coins) {
+                const sym = c.symbol || c.id;
+                const addr = c.address || c.id;
+                const liq = c.liquidity_usd ? ` | Lq: $${Math.round(c.liquidity_usd).toLocaleString()}` : '';
+                const dexLink = addr ? `https://dexscreener.com/solana/${addr}` : '#';
+                const header = `<div style="font-weight:700; margin-top:8px;">${sym} <a href="${dexLink}" target="_blank" rel="noopener noreferrer" style="color:#2b6cf0; text-decoration:none;">(chart)</a>${liq}</div>`;
+                const calls = Array.isArray(c.calls) ? c.calls : [];
+                const rows = calls.map(ev => {
+                  const when = ev.created_at ? new Date(ev.created_at).toLocaleString() : 'time unknown';
+                  const approx = typeof ev.approx_since_call_pct === 'number' ? `${ev.approx_since_call_pct.toFixed(1)}%` : 'n/a';
+                  let lt = '';
+                  if (ev.longterm && typeof ev.longterm === 'object') {
+                    const h24 = ev.longterm['24h'];
+                    const d7 = ev.longterm['7d'];
+                    const d30 = ev.longterm['30d'];
+                    const parts = [];
+                    if (typeof h24 === 'number') parts.push(`24h ${h24.toFixed(1)}%`);
+                    if (typeof d7 === 'number') parts.push(`7d ${d7.toFixed(1)}%`);
+                    if (typeof d30 === 'number') parts.push(`30d ${d30.toFixed(1)}%`);
+                    lt = parts.length ? ` | ${parts.join(' · ')}` : '';
+                  }
+                  return `<div style="font-size:13px; color:#333;">- ${when} — ~since-call: ${approx}${lt}</div>`;
+                }).join('');
+                items.push(header + rows);
+              }
+              callsList.innerHTML = items.join('');
+              callsList.style.display = items.length ? 'block' : 'none';
+            }
           } catch (e) {
             stopHoveringAndSet(1);
             alert('Network error');
