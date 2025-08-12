@@ -98,6 +98,7 @@ button:hover { filter: brightness(1.05); }
   background: hsl(var(--bar-hue, 0), 90%, 55%);
   transition: width 800ms cubic-bezier(.22,.61,.36,1), background-color 200ms linear;
 }
+.bar-fill.hovering { transition: none; }
 .bar-fill.settle { transition: width 650ms cubic-bezier(.22,.61,.36,1.1), background-color 200ms linear; }
 
 .bar-marker {
@@ -109,6 +110,7 @@ button:hover { filter: brightness(1.05); }
   box-shadow: 0 0 0 2px rgba(255,255,255,0.15);
   transition: left 800ms cubic-bezier(.22,.61,.36,1);
 }
+.bar-marker.hovering { transition: none; }
 .bar-marker.settle { transition: left 650ms cubic-bezier(.22,.61,.36,1.1); }
 .label { font-weight: 700; letter-spacing: 0.6px; }
 .address { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; color: var(--subtext); font-size: 12px; word-break: break-all; text-align: center; }

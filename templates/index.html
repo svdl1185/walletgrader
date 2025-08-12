@@ -91,19 +91,23 @@
 
         let hoverRAF = 0;
         function startHovering() {
-          // Start anywhere, occasionally bounce to extremes to feel more random
+          // Smooth constant-speed hover that slowly scans the full range
           let position = Math.floor(Math.random() * 101);
           let direction = Math.random() > 0.5 ? 1 : -1;
-          function step() {
-            // Occasionally jump target toward edges
-            if (Math.random() < 0.03) {
-              direction = Math.random() < 0.5 ? -1 : 1;
-              position += direction * (10 + Math.random() * 15);
-            } else {
-              position += direction * (0.6 + Math.random() * 2.2);
-            }
+          let speed = 0.35; // percent per ms
+
+          marker.classList.add('hovering');
+          fill.classList.add('hovering');
+
+          let last = performance.now();
+          function step(now) {
+            const dt = Math.min(32, now - last); // cap for stability
+            last = now;
+            position += direction * speed * dt;
+
             if (position >= 100) { position = 100; direction = -1; }
             if (position <= 0) { position = 0; direction = 1; }
+
             setPosition(position);
             hoverRAF = requestAnimationFrame(step);
           }
@@ -113,6 +117,8 @@
 
         function stopHoveringAndSet(finalScore) {
           if (hoverRAF) cancelAnimationFrame(hoverRAF);
+          marker.classList.remove('hovering');
+          fill.classList.remove('hovering');
           marker.classList.add('settle');
           fill.classList.add('settle');
           setPosition(finalScore);
