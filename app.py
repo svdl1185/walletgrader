@@ -25,6 +25,7 @@ except Exception:  # pragma: no cover
 app = Flask(__name__)
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = app.logger
+_LAST_RPC_URL: str | None = None
 
 # Single-scan tuning knobs (set via env for your RPC tier)
 # Recommended for paid RPC (raise gradually): PAGE_LIMIT 500–1000, MAX_PAGES 2–5, MAX_ANALYZE_TX 150–400
@@ -36,14 +37,10 @@ MAX_ANALYZE_TX = int(os.environ.get("SCAN_MAX_ANALYZE_TX", "180"))
 
 def get_solana_client() -> Client:
     rpc_url = os.environ.get("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
-    try:
-        # Log selected RPC once per change
-        global _LAST_RPC_URL  # type: ignore
-    except NameError:
-        _LAST_RPC_URL = None  # type: ignore
+    global _LAST_RPC_URL
     if rpc_url != _LAST_RPC_URL:
         logger.info("rpc:selected url=%s", rpc_url)
-        _LAST_RPC_URL = rpc_url  # type: ignore
+        _LAST_RPC_URL = rpc_url
     return Client(rpc_url)
 
 
