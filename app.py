@@ -1338,8 +1338,12 @@ def _extract_coin_mentions_per_tweet(tweets: List[Dict[str, Any]]) -> List[Dict[
         # Prefer structured cashtags when available
         symbols = []
         try:
-            for sym in (entities.get("mentions") or []) + (entities.get("symbols") or []):
-                val = (sym.get("tag") or sym.get("username") or sym.get("text") or "").upper()
+            for sym in (entities.get("cashtags") or []):
+                val = (sym.get("tag") or "").upper()
+                if val and val not in symbols and len(val) <= 15:
+                    symbols.append(val)
+            for h in (entities.get("hashtags") or []):
+                val = (h.get("tag") or "").upper()
                 if val and val not in symbols and len(val) <= 15:
                     symbols.append(val)
         except Exception:
