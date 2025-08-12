@@ -650,6 +650,7 @@ def _analyze_signatures_full(client: Client, public_key: Any, signatures_json: L
 
 
 def _run_deep_scan(scan_id: str, address: str) -> None:
+    logger.info("deep_scan:start scan_id=%s address=%s", scan_id, address)
     SCANS[scan_id] = {
         "status": "running",
         "progress": 0,
@@ -666,6 +667,7 @@ def _run_deep_scan(scan_id: str, address: str) -> None:
         else:
             public_key = PublicKey(address)
     except Exception:
+        logger.warning("deep_scan:invalid_address scan_id=%s address=%s", scan_id, address)
         SCANS[scan_id].update({"status": "error", "error": "Invalid Solana address."})
         return
 
@@ -674,7 +676,7 @@ def _run_deep_scan(scan_id: str, address: str) -> None:
     before_sig: str | None = None
     max_loops = 200  # safety cap
     try:
-        for _ in range(max_loops):
+        for loop_idx in range(max_loops):
             resp = client.get_signatures_for_address(public_key, before=before_sig, limit=500)
             batch: List[Any] = []
             if hasattr(resp, "value"):
@@ -690,15 +692,18 @@ def _run_deep_scan(scan_id: str, address: str) -> None:
                 batch = resp.get("result", []) or []
 
             if not batch:
+                logger.info("deep_scan:pagination_complete scan_id=%s total=%s", scan_id, len(all_sigs))
                 break
             all_sigs.extend(batch)
             before_sig = batch[-1].get("signature")
             SCANS[scan_id].update({"processed": len(all_sigs), "progress": min(95, SCANS[scan_id]["processed"] % 95)})
+            logger.info("deep_scan:page scan_id=%s loop=%s batch=%s cumulative=%s before=%s", scan_id, loop_idx, len(batch), len(all_sigs), before_sig)
 
             # Avoid monopolizing RPC
             time.sleep(0.1)
 
         # Analyze
+        logger.info("deep_scan:analyze_begin scan_id=%s total=%s", scan_id, len(all_sigs))
         result = _analyze_signatures_full(client, public_key, all_sigs)
         SCANS[scan_id].update({
             "status": "completed",
@@ -707,7 +712,9 @@ def _run_deep_scan(scan_id: str, address: str) -> None:
             "result": result,
             "finished_at": time.time(),
         })
+        logger.info("deep_scan:completed scan_id=%s score=%s", scan_id, result.get("score"))
     except Exception as e:
+        logger.exception("deep_scan:error scan_id=%s", scan_id)
         SCANS[scan_id].update({"status": "error", "error": str(e)})
 
 
@@ -720,6 +727,7 @@ def deep_scan_start():
     scan_id = uuid.uuid4().hex
     t = threading.Thread(target=_run_deep_scan, args=(scan_id, address), daemon=True)
     t.start()
+    logger.info("deep_scan:accepted scan_id=%s address=%s", scan_id, address)
     return jsonify({"scan_id": scan_id}), 202
 
 
@@ -728,6 +736,7 @@ def deep_scan_status(scan_id: str):
     job = SCANS.get(scan_id)
     if not job:
         return jsonify({"error": "Scan not found."}), 404
+    logger.info("deep_scan:status scan_id=%s status=%s processed=%s total=%s", scan_id, job.get("status"), job.get("processed"), job.get("total"))
     return jsonify({
         "status": job.get("status"),
         "progress": job.get("progress"),
