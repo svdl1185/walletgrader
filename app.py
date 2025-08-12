@@ -327,6 +327,14 @@ def grade_wallet(address: str) -> Dict[str, Any]:
     # Tail loss count (very bad % losses)
     tail_loss_count = sum(1 for t in losses if t["roi"] <= -0.6)
 
+    # Window-level proxy signals (fallback if no realized trades)
+    window_positive_sol = float(sum(d for _, d in trade_deltas_sorted if d > 0))
+    window_negative_sol = float(sum(abs(d) for _, d in trade_deltas_sorted if d < 0))
+    window_net_sol = window_positive_sol - window_negative_sol
+    positive_events = sum(1 for _, d in trade_deltas_sorted if d > 0)
+    negative_events = sum(1 for _, d in trade_deltas_sorted if d < 0)
+    best_positive_event_sol = max([d for _, d in trade_deltas_sorted if d > 0], default=0.0)
+
     # Score assembly (0-100), profit-first
     score = 0
 
@@ -394,6 +402,43 @@ def grade_wallet(address: str) -> Dict[str, Any]:
         tail_penalty += 2
     score -= min(10, tail_penalty)
 
+    # Fallback scoring if no realized trades were detected
+    if realized_trades == 0:
+        # Net gain over window
+        if window_net_sol >= 5:
+            score += 35
+        elif window_net_sol >= 2:
+            score += 25
+        elif window_net_sol >= 1:
+            score += 18
+        elif window_net_sol >= 0.25:
+            score += 10
+        elif window_net_sol > 0:
+            score += 6
+
+        # Single strong positive event bonus
+        if best_positive_event_sol >= 2:
+            score += 7
+        elif best_positive_event_sol >= 1:
+            score += 5
+        elif best_positive_event_sol >= 0.5:
+            score += 3
+
+        # Loss magnitude penalty
+        if window_negative_sol >= 5:
+            score -= 15
+        elif window_negative_sol >= 2:
+            score -= 10
+        elif window_negative_sol >= 1:
+            score -= 6
+        elif window_negative_sol >= 0.5:
+            score -= 3
+
+        # Event balance hint
+        if positive_events > 0 or negative_events > 0:
+            balance_ratio = (positive_events - negative_events) / float(max(1, positive_events + negative_events))
+            score += int(5 * max(-1.0, min(1.0, balance_ratio)))
+
     score = max(1, min(100, int(round(score))))
 
     label = human_label_from_score(score)
@@ -450,6 +495,13 @@ def grade_wallet(address: str) -> Dict[str, Any]:
             "big_roi_100_count": int(roi_100),
             "big_roi_200_count": int(roi_200),
             "median_win_hold_minutes": round(float(median_win_hold_minutes), 2),
+            # Window proxies
+            "window_positive_sol": round(window_positive_sol, 6),
+            "window_negative_sol": round(window_negative_sol, 6),
+            "window_net_sol": round(window_net_sol, 6),
+            "positive_events": int(positive_events),
+            "negative_events": int(negative_events),
+            "best_positive_event_sol": round(best_positive_event_sol, 6),
         },
     }
     logger.info("grade_wallet:done address=%s score=%s", address, score)
