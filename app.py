@@ -1184,16 +1184,17 @@ def _twitter_fetch_from_nitter(handle: str, max_results: int = 50) -> List[Dict[
         "https://nitter.privacydev.net",
     ]
     headers = {"User-Agent": "Mozilla/5.0"}
+    handle_path = (handle or "").lstrip("@")
     for base in instances:
         try:
-            url = f"{base}/{handle}"
+            url = f"{base}/{handle_path}"
             resp = requests.get(url, headers=headers, timeout=10)
             if not resp.ok or not resp.text:
                 continue
             soup = BeautifulSoup(resp.text, "html.parser")
             tweets: List[Dict[str, Any]] = []
-            # Each tweet link looks like /{handle}/status/{id}
-            for a in soup.select(f'a[href^="/{handle}/status/"]'):
+            # Each tweet link looks like /{handle}/status/{id} (case on handle varies). Match any status link.
+            for a in soup.select('a[href*="/status/"]'):
                 href = a.get('href') or ''
                 m = re.search(r"/status/(\d+)", href)
                 if not m:
@@ -1287,7 +1288,7 @@ def _fetch_single_tweet(tweet_id: str, handle_hint: str | None = None) -> Dict[s
     ]
     headers = {"User-Agent": "Mozilla/5.0"}
     for base in instances:
-        for path in (f"/i/web/status/{tweet_id}", f"/{handle_hint or ''}/status/{tweet_id}"):
+        for path in (f"/i/web/status/{tweet_id}", f"/{(handle_hint or '').lstrip('@')}/status/{tweet_id}"):
             try:
                 url = base + path
                 resp = requests.get(url, headers=headers, timeout=10)
@@ -1485,6 +1486,11 @@ def grade_twitter(handle_or_url: str) -> Dict[str, Any]:
         dedup.append(t)
     tweets = dedup
     events = _extract_coin_mentions_per_tweet(tweets)
+    # If still empty, try a second Nitter instance directly for robustness
+    if not events:
+        extra = _twitter_fetch_from_nitter(handle, max_results=50)
+        if extra:
+            events = _extract_coin_mentions_per_tweet(extra)
     if not events:
         return {
             "handle": handle,
