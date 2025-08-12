@@ -39,6 +39,7 @@ STABLE_MINTS: Set[str] = {
 # Dexscreener API base
 DEXSCREENER_SEARCH = "https://api.dexscreener.com/latest/dex/search?q="
 DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens/"
+BIRDEYE_HISTORY = "https://public-api.birdeye.so/defi/history_price"
 
 # Single-scan tuning knobs (set via env for your RPC tier)
 # Defaults tuned to stay under the frontend's 30s timeout; override via env for deeper scans
@@ -1168,7 +1169,7 @@ def _extract_handle(raw: str) -> str | None:
     return None
 
 
-def _twitter_fetch_recent_texts(handle: str, max_chars: int = 100_000) -> str:
+def _twitter_fetch_recent(handle: str, max_results: int = 100) -> List[Dict[str, Any]]:
     # Try Twitter API v2 if bearer provided
     bearer = os.environ.get("TWITTER_BEARER_TOKEN")
     if bearer:
@@ -1184,16 +1185,19 @@ def _twitter_fetch_recent_texts(handle: str, max_chars: int = 100_000) -> str:
                     r2 = requests.get(
                         f"https://api.twitter.com/2/users/{uid}/tweets",
                         params={
-                            "max_results": "100",
+                            "max_results": str(max_results),
                             "exclude": "retweets,replies",
                             "tweet.fields": "created_at,entities",
                         },
                         headers={"Authorization": f"Bearer {bearer}"}, timeout=12,
                     )
                     if r2.ok:
-                        texts = "\n\n".join(t.get("text", "") for t in r2.json().get("data", []) or [])
-                        if texts:
-                            return texts[:max_chars]
+                        out: List[Dict[str, Any]] = []
+                        for t in r2.json().get("data", []) or []:
+                            txt = t.get("text", "")
+                            ts = t.get("created_at")
+                            out.append({"text": txt, "created_at": ts})
+                        return out
         except Exception:
             pass
 
@@ -1207,32 +1211,53 @@ def _twitter_fetch_recent_texts(handle: str, max_chars: int = 100_000) -> str:
         try:
             resp = requests.get(url, timeout=10)
             if resp.ok and resp.text:
-                return resp.text[:max_chars]
+                # We cannot reliably parse timestamps from this text proxy; return a few recent entries with unknown times
+                chunks = [c.strip() for c in resp.text.split("\n\n") if c.strip()]
+                out: List[Dict[str, Any]] = []
+                for c in chunks[:50]:
+                    out.append({"text": c, "created_at": None})
+                return out
         except Exception:
             continue
-    return ""
+    return []
 
 
-def _extract_coin_mentions(text_blob: str) -> Dict[str, Dict[str, Any]]:
-    mentions: Dict[str, Dict[str, Any]] = {}
-    if not text_blob:
-        return mentions
-    # Cashtags like $COIN or $BONK
-    for m in re.finditer(r"\$([A-Za-z][A-Za-z0-9]{1,15})\b", text_blob):
-        sym = m.group(1).upper()
-        entry = mentions.setdefault(sym, {"kind": "symbol", "id": sym, "mentions": 0})
-        entry["mentions"] += 1
-    # Base58 mint addresses (32-44 chars)
-    for m in re.finditer(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b", text_blob):
-        addr = m.group(0)
-        entry = mentions.setdefault(addr, {"kind": "address", "id": addr, "mentions": 0})
-        entry["mentions"] += 1
-    # pump.fun links contain mint after ? or path
-    for m in re.finditer(r"pump\.fun/(?:token/)?([1-9A-HJ-NP-Za-km-z]{32,44})", text_blob):
-        addr = m.group(1)
-        entry = mentions.setdefault(addr, {"kind": "address", "id": addr, "mentions": 0})
-        entry["mentions"] += 2  # slightly heavier weight when explicitly linked
-    return mentions
+def _extract_coin_mentions_per_tweet(tweets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    events: List[Dict[str, Any]] = []
+    for tw in tweets:
+        text = tw.get("text") or ""
+        ts = tw.get("created_at")
+        # Cashtags symbols
+        for m in re.finditer(r"\$([A-Za-z][A-Za-z0-9]{1,15})\b", text):
+            sym = m.group(1).upper()
+            events.append({
+                "kind": "symbol",
+                "id": sym,
+                "text": text,
+                "created_at": ts,
+                "source": "cashtag",
+            })
+        # Solana base58 mints
+        for m in re.finditer(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b", text):
+            addr = m.group(0)
+            events.append({
+                "kind": "address",
+                "id": addr,
+                "text": text,
+                "created_at": ts,
+                "source": "mint",
+            })
+        # pump.fun links
+        for m in re.finditer(r"pump\.fun/(?:token/)?([1-9A-HJ-NP-Za-km-z]{32,44})", text):
+            addr = m.group(1)
+            events.append({
+                "kind": "address",
+                "id": addr,
+                "text": text,
+                "created_at": ts,
+                "source": "pumpfun",
+            })
+    return events
 
 
 def _dexscreener_lookup(ident: str, kind: str) -> Dict[str, Any] | None:
@@ -1264,7 +1289,87 @@ def _dexscreener_lookup(ident: str, kind: str) -> Dict[str, Any] | None:
             "change6h": float(change.get("h6") or 0),
             "change24h": float(change.get("h24") or 0),
             "liquidity_usd": float((best.get("liquidity", {}) or {}).get("usd") or 0),
+            "pair_address": best.get("pairAddress") or best.get("pairAddress"),
         }
+def _hours_since(dt_iso_str: str | None) -> float | None:
+    if not dt_iso_str:
+        return None
+    try:
+        # Normalize: 2025-01-01T12:34:56.000Z
+        dt = datetime.fromisoformat(dt_iso_str.replace("Z", "+00:00"))
+        return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0)
+    except Exception:
+        return None
+
+
+def _approx_return_since_call_using_dex(change: Dict[str, float], hours_since: float | None) -> float | None:
+    if hours_since is None:
+        return None
+    h1 = float(change.get("h1", 0) if isinstance(change, dict) else 0)
+    h6 = float(change.get("h6", 0) if isinstance(change, dict) else 0)
+    h24 = float(change.get("h24", 0) if isinstance(change, dict) else 0)
+    if hours_since <= 1.0:
+        return h1
+    if hours_since <= 6.0:
+        return h6
+    if hours_since <= 24.0:
+        return h24
+    # Longer-term requires external history; return 24h as best-effort
+    return h24
+
+
+def _birdeye_history_returns(address: str, call_dt_iso: str) -> Dict[str, float] | None:
+    api_key = os.environ.get("BIRDEYE_API_KEY")
+    if not api_key or not address or not call_dt_iso:
+        return None
+    try:
+        call_ts = int(datetime.fromisoformat(call_dt_iso.replace("Z", "+00:00")).timestamp())
+    except Exception:
+        return None
+    horizons = {"1h": 3600, "24h": 86400, "7d": 7*86400, "30d": 30*86400}
+    result: Dict[str, float] = {}
+    try:
+        # Pull 30d window around call in 1h candles
+        params = {
+            "address": address,
+            "time_from": str(call_ts - 3600),
+            "time_to": str(call_ts + 30*86400 + 3600),
+            "interval": "1h",
+        }
+        r = requests.get(BIRDEYE_HISTORY, params=params, headers={"X-API-KEY": api_key}, timeout=12)
+        if not r.ok:
+            return None
+        data = r.json()
+        prices = data.get("data", {}).get("items") or data.get("data", {}).get("price") or []
+        # Expect items like {"unixTime": 1700000000, "value": 0.001}
+        if not prices:
+            return None
+        # Find price at/just after call
+        def _nearest(ts_target: int):
+            nearest = None
+            best_dt = 10**12
+            for it in prices:
+                ts_i = int(it.get("unixTime") or it.get("time"))
+                dt = abs(ts_i - ts_target)
+                if dt < best_dt:
+                    best_dt = dt
+                    nearest = it
+            return nearest
+        base = _nearest(call_ts)
+        if not base:
+            return None
+        p0 = float(base.get("value") or base.get("price") or 0)
+        if p0 <= 0:
+            return None
+        for k, delta in horizons.items():
+            tgt = _nearest(call_ts + delta)
+            if tgt:
+                p1 = float(tgt.get("value") or tgt.get("price") or 0)
+                if p1 > 0:
+                    result[k] = (p1 / p0 - 1.0) * 100.0
+        return result if result else None
+    except Exception:
+        return None
     except Exception:
         return None
 
@@ -1274,9 +1379,9 @@ def grade_twitter(handle_or_url: str) -> Dict[str, Any]:
     if not handle:
         return {"error": "Please provide a valid @handle or Twitter URL."}
     logger.info("grade_twitter:start handle=%s", handle)
-    blob = _twitter_fetch_recent_texts(handle)
-    mentions = _extract_coin_mentions(blob)
-    if not mentions:
+    tweets = _twitter_fetch_recent(handle)
+    events = _extract_coin_mentions_per_tweet(tweets)
+    if not events:
         return {
             "handle": handle,
             "score": 50,
@@ -1284,21 +1389,48 @@ def grade_twitter(handle_or_url: str) -> Dict[str, Any]:
             "metrics": {
                 "message": "No coin mentions detected in recent tweets",
                 "unique_coins": 0,
-                "total_mentions": 0,
+                "total_calls": 0,
             },
             "coins": [],
         }
 
+    # Aggregate by ident, enrich, and keep per-call timestamps
+    calls_by_ident: Dict[str, List[Dict[str, Any]] ] = {}
+    for ev in events:
+        ident = ev["id"]
+        calls_by_ident.setdefault(ident, []).append(ev)
+
     enriched: List[Dict[str, Any]] = []
-    for ident, meta in list(mentions.items())[:40]:  # cap to keep things fast
-        info = _dexscreener_lookup(ident, meta.get("kind", "symbol"))
+    for ident, evs in list(calls_by_ident.items())[:40]:
+        info = _dexscreener_lookup(ident, evs[0].get("kind", "symbol"))
         if not info:
             continue
+        # Compute short-term approximations per call
+        per_call: List[Dict[str, Any]] = []
+        for ev in evs[:8]:  # cap calls per coin for perf
+            hs = _hours_since(ev.get("created_at"))
+            approx = _approx_return_since_call_using_dex({
+                "h1": info.get("change1h", 0),
+                "h6": info.get("change6h", 0),
+                "h24": info.get("change24h", 0),
+            }, hs)
+            longterm = _birdeye_history_returns(info.get("address"), ev.get("created_at")) if ev.get("created_at") else None
+            per_call.append({
+                "created_at": ev.get("created_at"),
+                "source": ev.get("source"),
+                "approx_since_call_pct": approx,
+                "longterm": longterm,
+            })
         enriched.append({
             "id": ident,
-            "kind": meta.get("kind", "symbol"),
-            "mentions": int(meta.get("mentions", 0)),
-            **info,
+            "kind": evs[0].get("kind", "symbol"),
+            "symbol": info.get("symbol"),
+            "address": info.get("address"),
+            "liquidity_usd": info.get("liquidity_usd"),
+            "change1h": info.get("change1h"),
+            "change6h": info.get("change6h"),
+            "change24h": info.get("change24h"),
+            "calls": per_call,
         })
 
     if not enriched:
@@ -1308,38 +1440,60 @@ def grade_twitter(handle_or_url: str) -> Dict[str, Any]:
             "label": human_label_from_score_twitter(45),
             "metrics": {
                 "message": "Mentions found but no Dexscreener data",
-                "unique_coins": len(mentions),
-                "total_mentions": int(sum(m.get("mentions", 0) for m in mentions.values())),
+                "unique_coins": len(calls_by_ident),
+                "total_calls": sum(len(v) for v in calls_by_ident.values()),
             },
             "coins": [],
         }
 
-    total_mentions = int(sum(c["mentions"] for c in enriched))
+    total_calls = int(sum(len(c["calls"]) for c in enriched))
     unique_coins = len(enriched)
 
     # Compute composite performance score weighted by mentions and liquidity
-    perf_sum = 0.0
-    perf_penalty = 0.0
+    perf_vals: List[float] = []
+    liq_low_calls = 0
+    pump_calls = 0
     for c in enriched:
-        weight = 1.0 + math.log10(max(1, c["mentions"])) + (0.25 if (c.get("liquidity_usd", 0) >= 50_000) else 0.0)
-        # Use the best among short windows to approximate post-shill outcome
-        change_best = max(c.get("change1h", 0) * 0.6, c.get("change6h", 0) * 0.3, c.get("change24h", 0) * 0.1)
-        if change_best >= 0:
-            perf_sum += weight * min(100, change_best)
-        else:
-            perf_penalty += weight * min(100, abs(change_best))
+        liq = float(c.get("liquidity_usd") or 0)
+        is_low_liq = liq < 30_000
+        for ev in c["calls"]:
+            if ev.get("source") == "pumpfun":
+                pump_calls += 1
+            if is_low_liq:
+                liq_low_calls += 1
+            approx = ev.get("approx_since_call_pct")
+            if isinstance(approx, (int, float)):
+                # Weight by liquidity bucket
+                w = 1.0 if liq >= 100_000 else (0.7 if liq >= 30_000 else 0.4)
+                perf_vals.append(w * float(approx))
 
     # Start from high and subtract for over-shilling
-    score = 90
-    # Penalize many unique coins
+    score = 85
+    # Over-shilling penalties
     if unique_coins > 3:
-        score -= min(40, int(3 * (unique_coins - 3)))
-    # Penalize spammy volume of mentions
-    if total_mentions > 20:
-        score -= min(20, int(1 * (total_mentions - 20)))
-    # Apply performance impact
-    score += int(min(25, perf_sum / max(1.0, unique_coins)))
-    score -= int(min(25, perf_penalty / max(1.0, unique_coins)))
+        score -= min(35, int(2 * (unique_coins - 3)))
+    if total_calls > 25:
+        score -= min(20, int(0.8 * (total_calls - 25)))
+    # Illiquidity penalty
+    if total_calls > 0:
+        illiq_ratio = liq_low_calls / float(total_calls)
+        score -= int(min(20, 25 * illiq_ratio))
+    # Pump.fun penalty
+    if total_calls > 0:
+        pump_ratio = pump_calls / float(total_calls)
+        score -= int(min(15, 20 * pump_ratio))
+    # Performance impact (short-term)
+    if perf_vals:
+        mean_perf = sum(perf_vals) / len(perf_vals)
+        # Consistency bonus/penalty
+        import statistics as _stats
+        try:
+            stdev = _stats.pstdev(perf_vals)
+        except Exception:
+            stdev = 0.0
+        sharpe_like = mean_perf / max(1.0, stdev)
+        score += int(max(-25, min(25, mean_perf / 4)))  # scale
+        score += int(max(-10, min(10, sharpe_like * 5)))
     # Clamp
     score = max(1, min(100, int(round(score))))
 
@@ -1352,16 +1506,24 @@ def grade_twitter(handle_or_url: str) -> Dict[str, Any]:
     best = max(enriched, key=lambda c: max(c.get("change1h", 0), c.get("change6h", 0), c.get("change24h", 0)))
     worst = min(enriched, key=lambda c: min(c.get("change1h", 0), c.get("change6h", 0), c.get("change24h", 0)))
 
+    # Hit rate within ~24h approximation
+    hits = [1 for c in enriched for ev in c["calls"] if isinstance(ev.get("approx_since_call_pct"), (int, float)) and ev.get("approx_since_call_pct", 0) >= 10.0]
+    hit_rate = (sum(hits) / max(1, len(perf_vals))) if perf_vals else 0.0
+
     return {
         "handle": handle,
         "score": score,
         "label": label,
         "metrics": {
             "unique_coins": unique_coins,
-            "total_mentions": total_mentions,
+            "total_calls": total_calls,
             "avg_change_1h": round(avg1h, 2),
             "avg_change_6h": round(avg6h, 2),
             "avg_change_24h": round(avg24h, 2),
+            "hit_rate_approx_24h": round(hit_rate, 3),
+            "low_liq_calls": int(liq_low_calls),
+            "pumpfun_calls": int(pump_calls),
+            "calls_with_perf": int(len(perf_vals)),
             "best_symbol": best.get("symbol"),
             "best_change_max": round(max(best.get("change1h", 0), best.get("change6h", 0), best.get("change24h", 0)), 2),
             "worst_symbol": worst.get("symbol"),

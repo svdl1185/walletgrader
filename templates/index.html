@@ -10,12 +10,12 @@
     <main class="container">
       <header class="header">
         <h1>Jeet Checker</h1>
-        <p class="subtitle">Enter a Solana address or Twitter @ to get a score.</p>
+        <p class="subtitle">Enter a Twitter @handle or profile link to get a reliability score.</p>
       </header>
 
       <form method="post" class="form" id="grade-form">
         <div class="row">
-          <input type="text" id="address" name="address" placeholder="e.g. 4Nd1m7... or @handle" value="" autofocus />
+          <input type="text" id="handle" name="handle" placeholder="e.g. @basedcaller or https://x.com/user" value="" autofocus />
           <button type="submit">Grade</button>
         </div>
         {% if error %}
@@ -101,8 +101,8 @@
 
         form.addEventListener('submit', async (e) => {
           e.preventDefault();
-          const address = (document.getElementById('address') || {}).value || '';
-          if (!address.trim()) return;
+          const handle = (document.getElementById('handle') || {}).value || '';
+          if (!handle.trim()) return;
           results.style.display = 'block';
           marker.classList.remove('settle');
           fill.classList.remove('settle');
@@ -111,9 +111,8 @@
           try {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 60000);
-            const isTwitter = /^@|twitter\.com\/|x\.com\//i.test(address);
-            const endpoint = isTwitter ? '/grade_twitter' : '/grade';
-            const payload = isTwitter ? { handle: address } : { address };
+            const endpoint = '/grade_twitter';
+            const payload = { handle };
             const resp = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: controller.signal });
             clearTimeout(timeoutId);
             let data = {};
@@ -123,17 +122,10 @@
             scoreLine.style.display = 'block';
             scoreValue.textContent = String(data.score);
             scoreName.textContent = String(data.label);
-            if (data.handle) {
-              heurHold.textContent = `Unique coins: ${data.metrics.unique_coins}`;
-              heurActivity.textContent = `Mentions: ${data.metrics.total_mentions}`;
-              scoreMeta.style.display = 'block';
-              scoreMeta.textContent = `Avg 1h: ${data.metrics.avg_change_1h ?? 0}% | Avg 6h: ${data.metrics.avg_change_6h ?? 0}% | Avg 24h: ${data.metrics.avg_change_24h ?? 0}%`;
-            } else {
-              heurHold.textContent = `Hold profile: ${data.metrics.hold_profile}`;
-              heurActivity.textContent = `Activity profile: ${data.metrics.activity_profile}`;
-              scoreMeta.style.display = 'none';
-              scoreMeta.textContent = '';
-            }
+            heurHold.textContent = `Unique coins: ${data.metrics.unique_coins}`;
+            heurActivity.textContent = `Total calls: ${data.metrics.total_calls}`;
+            scoreMeta.style.display = 'block';
+            scoreMeta.textContent = `Avg 1h: ${data.metrics.avg_change_1h ?? 0}% | Avg 6h: ${data.metrics.avg_change_6h ?? 0}% | Avg 24h: ${data.metrics.avg_change_24h ?? 0}% | Hit rate (~24h): ${(data.metrics.hit_rate_approx_24h ?? 0) * 100}%`;
           } catch (e) {
             stopHoveringAndSet(1);
             alert('Network error');
