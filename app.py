@@ -1888,8 +1888,13 @@ def grade_twitter(handle_or_url: str) -> Dict[str, Any]:
     avg1h = sum(c.get("change1h", 0) or 0 for c in enriched) / max(1, unique_coins)
     avg6h = sum(c.get("change6h", 0) or 0 for c in enriched) / max(1, unique_coins)
     avg24h = sum(c.get("change24h", 0) or 0 for c in enriched) / max(1, unique_coins)
-    best = max(enriched, key=lambda c: max(c.get("change1h", 0), c.get("change6h", 0), c.get("change24h", 0)))
-    worst = min(enriched, key=lambda c: min(c.get("change1h", 0), c.get("change6h", 0), c.get("change24h", 0)))
+    safe3 = lambda c: (
+        (c.get("change1h") or 0),
+        (c.get("change6h") or 0),
+        (c.get("change24h") or 0),
+    )
+    best = max(enriched, key=lambda c: max(*safe3(c)))
+    worst = min(enriched, key=lambda c: min(*safe3(c)))
 
     # Hit rate within ~24h approximation
     hits = [1 for c in enriched for ev in c["calls"] if isinstance(ev.get("approx_since_call_pct"), (int, float)) and ev.get("approx_since_call_pct", 0) >= 10.0]
