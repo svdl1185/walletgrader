@@ -1170,6 +1170,12 @@ def _extract_handle(raw: str) -> str | None:
     return None
 
 
+def _extract_status_id(raw: str) -> str | None:
+    s = (raw or "").strip()
+    m = re.search(r"(?:https?://)?(?:www\.)?(?:x|twitter)\.com/[^/]+/status/(\d+)", s)
+    return m.group(1) if m else None
+
+
 def _twitter_fetch_from_nitter(handle: str, max_results: int = 50) -> List[Dict[str, Any]]:
     instances = [
         "https://nitter.net",
@@ -1253,6 +1259,50 @@ def _twitter_fetch_recent(handle: str, max_results: int = 100) -> List[Dict[str,
     if nitter:
         return nitter
     return []
+
+
+def _fetch_single_tweet(tweet_id: str, handle_hint: str | None = None) -> Dict[str, Any] | None:
+    # Primary: Twitter API v2
+    bearer = os.environ.get("TWITTER_BEARER_TOKEN")
+    if bearer:
+        try:
+            r = requests.get(
+                f"https://api.twitter.com/2/tweets/{tweet_id}",
+                params={"tweet.fields": "created_at"},
+                headers={"Authorization": f"Bearer {bearer}"},
+                timeout=10,
+            )
+            if r.ok:
+                d = r.json().get("data", {})
+                if d and d.get("id"):
+                    return {"id": d.get("id"), "text": d.get("text", ""), "created_at": d.get("created_at")}
+        except Exception:
+            pass
+    # Fallback: Nitter HTML
+    instances = [
+        "https://nitter.net",
+        "https://nitter.poast.org",
+        "https://n.opnxng.com",
+        "https://nitter.privacydev.net",
+    ]
+    headers = {"User-Agent": "Mozilla/5.0"}
+    for base in instances:
+        for path in (f"/i/web/status/{tweet_id}", f"/{handle_hint or ''}/status/{tweet_id}"):
+            try:
+                url = base + path
+                resp = requests.get(url, headers=headers, timeout=10)
+                if not resp.ok or not resp.text:
+                    continue
+                soup = BeautifulSoup(resp.text, "html.parser")
+                time_tag = soup.find('time')
+                dt_iso = time_tag.get('datetime') if (time_tag and time_tag.has_attr('datetime')) else None
+                content = soup.select_one('.tweet-content, .status-content, .content')
+                text = content.get_text(" ", strip=True) if content else soup.get_text(" ", strip=True)[:400]
+                if text:
+                    return {"id": tweet_id, "text": text, "created_at": dt_iso}
+            except Exception:
+                continue
+    return None
 
 
 def _extract_coin_mentions_per_tweet(tweets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1416,7 +1466,24 @@ def grade_twitter(handle_or_url: str) -> Dict[str, Any]:
     if not handle:
         return {"error": "Please provide a valid @handle or Twitter URL."}
     logger.info("grade_twitter:start handle=%s", handle)
-    tweets = _twitter_fetch_recent(handle)
+    tweets: List[Dict[str, Any]] = []
+    status_id = _extract_status_id(handle_or_url or "")
+    if status_id:
+        one = _fetch_single_tweet(status_id, handle)
+        if one:
+            tweets.append(one)
+    tweets.extend(_twitter_fetch_recent(handle))
+    # Deduplicate by id keeping the earliest occurrence (status first)
+    seen: Set[str] = set()
+    dedup: List[Dict[str, Any]] = []
+    for t in tweets:
+        tid = str(t.get("id") or "")
+        if tid and tid in seen:
+            continue
+        if tid:
+            seen.add(tid)
+        dedup.append(t)
+    tweets = dedup
     events = _extract_coin_mentions_per_tweet(tweets)
     if not events:
         return {
