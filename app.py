@@ -36,6 +36,14 @@ MAX_ANALYZE_TX = int(os.environ.get("SCAN_MAX_ANALYZE_TX", "180"))
 
 def get_solana_client() -> Client:
     rpc_url = os.environ.get("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
+    try:
+        # Log selected RPC once per change
+        global _LAST_RPC_URL  # type: ignore
+    except NameError:
+        _LAST_RPC_URL = None  # type: ignore
+    if rpc_url != _LAST_RPC_URL:
+        logger.info("rpc:selected url=%s", rpc_url)
+        _LAST_RPC_URL = rpc_url  # type: ignore
     return Client(rpc_url)
 
 
@@ -104,7 +112,7 @@ def grade_wallet(address: str) -> Dict[str, Any]:
                 attempts += 1
                 if attempts >= 5:
                     raise
-                sleep_for = delay * (2 ** (attempts - 1)) + random.uniform(0, 0.2)
+                sleep_for = delay * (2 ** (attempts - 1)) + random.uniform(0.2, 0.6)
                 time.sleep(sleep_for)
 
     try:
@@ -135,6 +143,8 @@ def grade_wallet(address: str) -> Dict[str, Any]:
             before_sig = batch[-1].get("signature")
             if len(signatures_json) >= MAX_ANALYZE_TX:
                 break
+            # small pacing to avoid bursts even on paid RPC
+            time.sleep(0.05)
     except Exception:
         logger.exception("grade_wallet:signatures_fetch_failed address=%s", address)
         # keep whatever we collected so far
