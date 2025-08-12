@@ -1196,7 +1196,8 @@ def _twitter_fetch_recent(handle: str, max_results: int = 100) -> List[Dict[str,
                         for t in r2.json().get("data", []) or []:
                             txt = t.get("text", "")
                             ts = t.get("created_at")
-                            out.append({"text": txt, "created_at": ts})
+                            tid = t.get("id")
+                            out.append({"id": tid, "text": txt, "created_at": ts})
                         return out
         except Exception:
             pass
@@ -1215,7 +1216,7 @@ def _twitter_fetch_recent(handle: str, max_results: int = 100) -> List[Dict[str,
                 chunks = [c.strip() for c in resp.text.split("\n\n") if c.strip()]
                 out: List[Dict[str, Any]] = []
                 for c in chunks[:50]:
-                    out.append({"text": c, "created_at": None})
+                    out.append({"id": None, "text": c, "created_at": None})
                 return out
         except Exception:
             continue
@@ -1227,6 +1228,7 @@ def _extract_coin_mentions_per_tweet(tweets: List[Dict[str, Any]]) -> List[Dict[
     for tw in tweets:
         text = tw.get("text") or ""
         ts = tw.get("created_at")
+        tid = tw.get("id")
         # Cashtags symbols
         for m in re.finditer(r"\$([A-Za-z][A-Za-z0-9]{1,15})\b", text):
             sym = m.group(1).upper()
@@ -1235,6 +1237,7 @@ def _extract_coin_mentions_per_tweet(tweets: List[Dict[str, Any]]) -> List[Dict[
                 "id": sym,
                 "text": text,
                 "created_at": ts,
+                "tweet_id": tid,
                 "source": "cashtag",
             })
         # Solana base58 mints
@@ -1245,6 +1248,7 @@ def _extract_coin_mentions_per_tweet(tweets: List[Dict[str, Any]]) -> List[Dict[
                 "id": addr,
                 "text": text,
                 "created_at": ts,
+                "tweet_id": tid,
                 "source": "mint",
             })
         # pump.fun links
@@ -1255,6 +1259,7 @@ def _extract_coin_mentions_per_tweet(tweets: List[Dict[str, Any]]) -> List[Dict[
                 "id": addr,
                 "text": text,
                 "created_at": ts,
+                "tweet_id": tid,
                 "source": "pumpfun",
             })
     return events
@@ -1418,6 +1423,7 @@ def grade_twitter(handle_or_url: str) -> Dict[str, Any]:
             per_call.append({
                 "created_at": ev.get("created_at"),
                 "source": ev.get("source"),
+                "tweet_id": ev.get("tweet_id"),
                 "approx_since_call_pct": approx,
                 "longterm": longterm,
             })

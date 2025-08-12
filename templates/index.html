@@ -142,6 +142,7 @@
                 const rows = calls.map(ev => {
                   const when = ev.created_at ? new Date(ev.created_at).toLocaleString() : 'time unknown';
                   const approx = typeof ev.approx_since_call_pct === 'number' ? `${ev.approx_since_call_pct.toFixed(1)}%` : 'n/a';
+                  const tw = ev.tweet_id ? ` | <a href="https://x.com/i/web/status/${ev.tweet_id}" target="_blank" rel="noopener noreferrer" style="color:#2b6cf0; text-decoration:none;">tweet</a>` : '';
                   let lt = '';
                   if (ev.longterm && typeof ev.longterm === 'object') {
                     const h24 = ev.longterm['24h'];
@@ -153,7 +154,7 @@
                     if (typeof d30 === 'number') parts.push(`30d ${d30.toFixed(1)}%`);
                     lt = parts.length ? ` | ${parts.join(' · ')}` : '';
                   }
-                  return `<div style="font-size:13px; color:#333;">- ${when} — ~since-call: ${approx}${lt}</div>`;
+                  return `<div style="font-size:13px; color:#333;">- ${when} — ~since-call: ${approx}${tw}${lt}</div>`;
                 }).join('');
                 items.push(header + rows);
               }
