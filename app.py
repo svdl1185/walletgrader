@@ -195,6 +195,17 @@ def grade_wallet(address: str) -> Dict[str, Any]:
     sample_sigs: List[str] = [s.get("signature") for s in signatures_json if s.get("signature")]
     sampled_tx: List[Tuple[int, Set[str]]] = []  # list of (timestamp, set(program_ids))
     trade_deltas: List[Tuple[int, float]] = []  # (timestamp, net SOL delta excluding fee)
+    # Token-aware position tracking (per mint) using FIFO lots and SOL-equivalent cost/proceeds
+    from collections import deque
+    class _Lot:
+        def __init__(self, ts: int, amount_ui: float, cost_sol: float) -> None:
+            self.ts = int(ts)
+            self.amount_ui = float(amount_ui)
+            self.cost_sol = float(cost_sol)
+    positions: Dict[str, deque[_Lot]] = {}
+    realized_token: List[Dict[str, float | int | str]] = []
+    # Local threshold for ignoring tiny flows
+    min_move_sol_local = max(0.01, MIN_TRADE_USD / max(1e-6, SOL_PRICE_USD))
 
     for sig in sample_sigs:
         try:
@@ -333,6 +344,90 @@ def grade_wallet(address: str) -> Dict[str, Any]:
                 delta_sol_total = native_delta_sol + float(wsol_delta_tokens) + float(stable_delta_sol_equiv)
                 if abs(delta_sol_total) > 1e-9:
                     trade_deltas.append((int(block_time), delta_sol_total))
+
+                # Derive per-mint token deltas owned by this wallet (excluding SOL/wSOL/stables)
+                try:
+                    # Build maps again if needed
+                    pre_toks = meta.get("preTokenBalances", []) or []
+                    post_toks = meta.get("postTokenBalances", []) or []
+                    def extract_map(arr):
+                        m = {}
+                        for b in arr:
+                            mint = b.get("mint")
+                            owner = b.get("owner") or (b.get("accountOwner") if isinstance(b.get("accountOwner"), str) else None)
+                            ui = None
+                            amt = b.get("uiTokenAmount") or {}
+                            if isinstance(amt, dict):
+                                ui = amt.get("uiAmount")
+                                if ui is None:
+                                    try:
+                                        raw = int(amt.get("amount", "0"))
+                                        dec = int(amt.get("decimals", 0))
+                                        ui = float(raw) / (10 ** dec)
+                                    except Exception:
+                                        ui = 0.0
+                            elif isinstance(amt, (int, float)):
+                                ui = float(amt)
+                            if mint and owner == wallet_str:
+                                m[mint] = m.get(mint, 0.0) + float(ui or 0.0)
+                        return m
+                    pre_map_any = extract_map(pre_toks)
+                    post_map_any = extract_map(post_toks)
+                    token_deltas_ui: Dict[str, float] = {}
+                    mints = set(pre_map_any.keys()) | set(post_map_any.keys())
+                    for mint in mints:
+                        if mint in WSOL_MINTS or mint in STABLE_MINTS:
+                            continue
+                        token_deltas_ui[mint] = float(post_map_any.get(mint, 0.0) - pre_map_any.get(mint, 0.0))
+
+                    # Split buys/sells per mint and allocate SOL cost/proceeds
+                    pos_ui = {m: d for m, d in token_deltas_ui.items() if d > 0}
+                    neg_ui = {m: -d for m, d in token_deltas_ui.items() if d < 0}
+                    if delta_sol_total < -min_move_sol_local and pos_ui:
+                        total_ui = sum(pos_ui.values()) or 1.0
+                        for mint, amt_ui in pos_ui.items():
+                            alloc_cost = abs(delta_sol_total) * (amt_ui / total_ui)
+                            lot = _Lot(int(block_time), amt_ui, alloc_cost)
+                            if mint not in positions:
+                                positions[mint] = deque()
+                            positions[mint].append(lot)
+                    if delta_sol_total > min_move_sol_local and neg_ui:
+                        total_ui = sum(neg_ui.values()) or 1.0
+                        for mint, amt_ui_sold in neg_ui.items():
+                            alloc_proceeds = float(delta_sol_total) * (amt_ui_sold / total_ui)
+                            # Realize against FIFO lots
+                            lots = positions.get(mint)
+                            remaining = float(amt_ui_sold)
+                            cost_used = 0.0
+                            entry_ts = None
+                            while remaining > 1e-12 and lots and len(lots) > 0:
+                                lot0 = lots[0]
+                                take = min(lot0.amount_ui, remaining)
+                                cost_per_ui = (lot0.cost_sol / lot0.amount_ui) if lot0.amount_ui > 0 else 0.0
+                                cost_used += cost_per_ui * take
+                                remaining -= take
+                                lot0.amount_ui -= take
+                                lot0.cost_sol -= cost_per_ui * take
+                                if entry_ts is None:
+                                    entry_ts = lot0.ts
+                                if lot0.amount_ui <= 1e-12:
+                                    lots.popleft()
+                            if entry_ts is None:
+                                entry_ts = int(block_time)
+                            proceeds = alloc_proceeds
+                            pnl = proceeds - cost_used
+                            roi = (proceeds / cost_used - 1.0) if cost_used > 0 else (1.0 if proceeds > 0 else 0.0)
+                            hold_sec = max(0, int(int(block_time) - entry_ts))
+                            realized_token.append({
+                                "mint": mint,
+                                "outflow_sol": round(float(cost_used), 9),
+                                "inflow_sol": round(float(proceeds), 9),
+                                "pnl_sol": round(float(pnl), 9),
+                                "roi": round(float(roi), 6),
+                                "hold_seconds": int(hold_sec),
+                            })
+                except Exception:
+                    pass
             except Exception:
                 pass
         except Exception:
@@ -404,10 +499,15 @@ def grade_wallet(address: str) -> Dict[str, Any]:
                 })
         # else small noise ignored
 
-    # Aggregate metrics
-    wins = [t for t in realized if t["pnl_sol"] > 0]
-    losses = [t for t in realized if t["pnl_sol"] < 0]
-    realized_trades = len(realized)
+    # Aggregate metrics (combine SOL-cycle and token-aware realizations)
+    combined = [
+        {**t, "source": "sol"} for t in realized
+    ] + [
+        {**t, "source": "token"} for t in realized_token
+    ]
+    wins = [t for t in combined if t["pnl_sol"] > 0]
+    losses = [t for t in combined if t["pnl_sol"] < 0]
+    realized_trades = len(combined)
     wins_count = len(wins)
     losses_count = len(losses)
     total_profit_sol = float(sum(t["pnl_sol"] for t in wins)) if wins else 0.0
@@ -418,8 +518,8 @@ def grade_wallet(address: str) -> Dict[str, Any]:
 
     best_trade_profit_sol = max([t["pnl_sol"] for t in wins], default=0.0)
     worst_trade_loss_sol = min([t["pnl_sol"] for t in losses], default=0.0)
-    best_trade_roi = max([t["roi"] for t in realized], default=0.0)
-    worst_trade_roi = min([t["roi"] for t in realized], default=0.0)
+    best_trade_roi = max([t["roi"] for t in combined], default=0.0)
+    worst_trade_roi = min([t["roi"] for t in combined], default=0.0)
 
     # Quick wins by hold time thresholds (applied to winning trades only)
     win_hold_minutes = [t["hold_seconds"] / 60.0 for t in wins]
@@ -429,9 +529,9 @@ def grade_wallet(address: str) -> Dict[str, Any]:
     quick_6h = sum(1 for t in wins if 2 * 3600 < t["hold_seconds"] <= 6 * 3600)
 
     # Big % profit counts
-    roi_50 = sum(1 for t in realized if t["roi"] >= 0.5)
-    roi_100 = sum(1 for t in realized if t["roi"] >= 1.0)
-    roi_200 = sum(1 for t in realized if t["roi"] >= 2.0)
+    roi_50 = sum(1 for t in combined if t["roi"] >= 0.5)
+    roi_100 = sum(1 for t in combined if t["roi"] >= 1.0)
+    roi_200 = sum(1 for t in combined if t["roi"] >= 2.0)
 
     # Tail loss count (very bad % losses)
     tail_loss_count = sum(1 for t in losses if t["roi"] <= -0.6)
@@ -525,7 +625,7 @@ def grade_wallet(address: str) -> Dict[str, Any]:
         elif window_net_sol >= 0.25:
             score += 8
         elif window_net_sol > 0:
-            score += 6
+        score += 6
 
         # Single strong positive event bonus
         if best_positive_event_sol >= 2:
@@ -543,7 +643,7 @@ def grade_wallet(address: str) -> Dict[str, Any]:
         elif window_negative_sol >= 2:
             score -= 8
         elif window_negative_sol >= 1:
-            score -= 5
+        score -= 5
 
         # Event balance hint
         if positive_events > 0 or negative_events > 0:
@@ -728,7 +828,7 @@ def _analyze_signatures_full(client: Client, public_key: Any, signatures_json: L
         if dsol < -min_move_sol:
             if open_cycle is None:
                 open_cycle = _Cycle2(ts, abs(dsol))
-            else:
+    else:
                 open_cycle.outflow += abs(dsol)
         elif dsol > min_move_sol:
             if open_cycle is None:
