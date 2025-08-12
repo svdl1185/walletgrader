@@ -33,9 +33,13 @@ WSOL_MINTS: Set[str] = {
 # Single-scan tuning knobs (set via env for your RPC tier)
 # Paid RPC defaults tuned for < ~1 minute wall time on typical wallets
 PAGE_LIMIT = int(os.environ.get("SCAN_PAGE_LIMIT", "1000"))  # signatures per page
-MAX_PAGES = int(os.environ.get("SCAN_MAX_PAGES", "10"))      # pages of signatures
+MAX_PAGES = int(os.environ.get("SCAN_MAX_PAGES", "20"))      # pages of signatures
 TIME_BUDGET_SEC = float(os.environ.get("SCAN_TIME_BUDGET_SEC", "55"))
-MAX_ANALYZE_TX = int(os.environ.get("SCAN_MAX_ANALYZE_TX", "600"))
+MAX_ANALYZE_TX = int(os.environ.get("SCAN_MAX_ANALYZE_TX", "1000"))
+
+# USD filter for small moves
+SOL_PRICE_USD = float(os.environ.get("SOL_PRICE_USD", "150"))
+MIN_TRADE_USD = float(os.environ.get("MIN_TRADE_USD", "10"))
 
 
 def get_solana_client() -> Client:
@@ -64,10 +68,10 @@ def human_label_from_score(score: int) -> str:
     if score >= 50:
         return "Normie"
     if score >= 40:
-        return "NPC"
+        return "Degen"
     if score >= 30:
         # Replaced harmful label with a neutral one
-        return "Degen"
+        return "Jew"
     if score >= 25:
         return "Tiktokker"
     if score >= 20:
@@ -75,12 +79,12 @@ def human_label_from_score(score: int) -> str:
 
     # 1–19 broken into 4 neutral tiers of 5 points each
     if score >= 16:
-        return "Wrecked I"
+        return "Brahmin"
     if score >= 11:
-        return "Wrecked II"
+        return "Kshatriya"
     if score >= 6:
-        return "Wrecked III"
-    return "Wrecked IV"
+        return "Vaishya"
+    return "Shudra"
 
 def grade_wallet(address: str) -> Dict[str, Any]:
     logger.info("grade_wallet:start address=%s", address)
@@ -338,7 +342,8 @@ def grade_wallet(address: str) -> Dict[str, Any]:
 
     # Build realized roundtrips from SOL deltas using a simple cycle model
     trade_deltas_sorted = sorted(trade_deltas, key=lambda t: t[0])
-    min_move_sol = 0.01  # ignore tiny moves
+    # Dynamic minimum move threshold in SOL based on USD size
+    min_move_sol = max(0.01, MIN_TRADE_USD / max(1e-6, SOL_PRICE_USD))
 
     # Aggregate cycle model: realize a trade only when cumulative inflow >= cumulative outflow
     class _Cycle:
@@ -409,12 +414,12 @@ def grade_wallet(address: str) -> Dict[str, Any]:
     tail_loss_count = sum(1 for t in losses if t["roi"] <= -0.6)
 
     # Window-level proxy signals (fallback if no realized trades)
-    window_positive_sol = float(sum(d for _, d in trade_deltas_sorted if d > 0))
-    window_negative_sol = float(sum(abs(d) for _, d in trade_deltas_sorted if d < 0))
+    window_positive_sol = float(sum(d for _, d in trade_deltas_sorted if d > min_move_sol))
+    window_negative_sol = float(sum(abs(d) for _, d in trade_deltas_sorted if d < -min_move_sol))
     window_net_sol = window_positive_sol - window_negative_sol
-    positive_events = sum(1 for _, d in trade_deltas_sorted if d > 0)
-    negative_events = sum(1 for _, d in trade_deltas_sorted if d < 0)
-    best_positive_event_sol = max([d for _, d in trade_deltas_sorted if d > 0], default=0.0)
+    positive_events = sum(1 for _, d in trade_deltas_sorted if d > min_move_sol)
+    negative_events = sum(1 for _, d in trade_deltas_sorted if d < -min_move_sol)
+    best_positive_event_sol = max([d for _, d in trade_deltas_sorted if d > min_move_sol], default=0.0)
 
     # Score assembly (0-100), profit-first
     score = 0
@@ -466,16 +471,18 @@ def grade_wallet(address: str) -> Dict[str, Any]:
     elif best_trade_profit_sol >= 0.5:
         score += 3
 
-    # Loss magnitude penalty (up to -25)
+    # Loss magnitude penalty (up to -25), scaled to avoid collapsing everyone into 1–10
     loss_mag = abs(total_loss_sol)
-    if loss_mag >= 10:
+    if loss_mag >= 20:
         score -= 25
+    elif loss_mag >= 10:
+        score -= 20
     elif loss_mag >= 5:
-        score -= 18
+        score -= 14
     elif loss_mag >= 2:
-        score -= 12
+        score -= 9
     elif loss_mag >= 1:
-        score -= 7
+        score -= 5
 
     # Tail loss penalty (up to -10)
     tail_penalty = 2 * tail_loss_count
@@ -487,13 +494,13 @@ def grade_wallet(address: str) -> Dict[str, Any]:
     if realized_trades == 0:
         # Net gain over window
         if window_net_sol >= 5:
-            score += 35
+            score += 30
         elif window_net_sol >= 2:
-            score += 25
+            score += 22
         elif window_net_sol >= 1:
-            score += 18
+            score += 15
         elif window_net_sol >= 0.25:
-            score += 10
+            score += 8
         elif window_net_sol > 0:
             score += 6
 
@@ -506,14 +513,14 @@ def grade_wallet(address: str) -> Dict[str, Any]:
             score += 3
 
         # Loss magnitude penalty
-        if window_negative_sol >= 5:
+        if window_negative_sol >= 10:
             score -= 15
+        elif window_negative_sol >= 5:
+            score -= 12
         elif window_negative_sol >= 2:
-            score -= 10
+            score -= 8
         elif window_negative_sol >= 1:
-            score -= 6
-        elif window_negative_sol >= 0.5:
-            score -= 3
+            score -= 5
 
         # Event balance hint
         if positive_events > 0 or negative_events > 0:
