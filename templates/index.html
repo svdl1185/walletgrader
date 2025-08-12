@@ -164,11 +164,74 @@
               heurHold.textContent = `Hold profile: ${data.metrics.hold_profile}`;
               heurActivity.textContent = `Activity profile: ${data.metrics.activity_profile}`;
             }
+
+            // Attach deep scan button dynamically
+            setupDeepScan(address);
           } catch (err) {
             stopHoveringAndSet(1);
             alert('Network error');
           }
         });
+
+        function setupDeepScan(address) {
+          if (document.getElementById('deep-scan-btn')) return;
+          const explain = document.getElementById('explanation');
+          if (!explain) return;
+          const btn = document.createElement('button');
+          btn.id = 'deep-scan-btn';
+          btn.textContent = 'Deep scan full history';
+          btn.style.marginTop = '12px';
+          btn.addEventListener('click', async () => {
+            // Start hover as loading indicator
+            results.style.display = 'block';
+            marker.classList.remove('settle');
+            fill.classList.remove('settle');
+            marker.classList.add('hovering');
+            fill.classList.add('hovering');
+            setPosition(Math.floor(Math.random() * 100));
+            if (hoverRAF) cancelAnimationFrame(hoverRAF);
+            let last = performance.now();
+            function step(now) {
+              const dt = Math.min(32, now - last); last = now;
+              const pos = parseFloat(fill.style.getPropertyValue('--fill-percentage')) || 0;
+              const dir = Math.random() > 0.5 ? 1 : -1;
+              setPosition(Math.max(0, Math.min(100, pos + dir * 0.25 * dt)));
+              hoverRAF = requestAnimationFrame(step);
+            }
+            hoverRAF = requestAnimationFrame(step);
+
+            try {
+              const start = await fetch('/deep-scan', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ address })
+              });
+              const { scan_id } = await start.json();
+              if (!scan_id) throw new Error('Failed to start deep scan');
+              // Poll
+              const poll = async () => {
+                const resp = await fetch(`/deep-scan/${scan_id}`);
+                const st = await resp.json();
+                if (st.status === 'completed' && st.result) {
+                  stopHoveringAndSet(st.result.score || 1);
+                  scoreLine.style.display = 'block';
+                  scoreValue.textContent = String(st.result.score);
+                  scoreName.textContent = String(st.result.label);
+                  heurHold.textContent = `Hold profile: ${st.result.metrics.hold_profile}`;
+                  heurActivity.textContent = `Activity profile: ${st.result.metrics.activity_profile}`;
+                } else if (st.status === 'error') {
+                  stopHoveringAndSet(1);
+                  alert(st.error || 'Deep scan failed');
+                } else {
+                  setTimeout(poll, 1500);
+                }
+              };
+              poll();
+            } catch (e) {
+              stopHoveringAndSet(1);
+              alert('Deep scan could not start');
+            }
+          });
+          explain.appendChild(btn);
+        }
       })();
     </script>
   </body>
