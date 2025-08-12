@@ -108,7 +108,8 @@ def grade_wallet(address: str) -> Dict[str, Any]:
         days_old = max(0, (datetime.now(timezone.utc) - first_tx_time).days)
 
     # Inspect a sample of transactions to infer basic trading cadence features
-    sample_sigs: List[str] = [s.get("signature") for s in signatures_json[:40] if s.get("signature")]
+    # Keep sampling modest to reduce RPC latency and avoid platform timeouts
+    sample_sigs: List[str] = [s.get("signature") for s in signatures_json[:20] if s.get("signature")]
     sampled_tx: List[Tuple[int, Set[str]]] = []  # list of (timestamp, set(program_ids))
 
     for sig in sample_sigs:

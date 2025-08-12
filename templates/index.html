@@ -58,7 +58,9 @@
         </ul>
       </section>
 
-      
+      <div style="text-align:center; color: var(--subtext); margin-top: 12px;">
+        <a href="https://github.com/svdl1185/walletgrader" target="_blank" rel="noopener noreferrer" style="color: var(--primary); text-decoration: none;">View source on GitHub</a>
+      </div>
     </main>
     <script>
       (function() {
@@ -129,12 +131,17 @@
           startHovering();
 
           try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 15000);
             const resp = await fetch('/grade', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ address })
+              body: JSON.stringify({ address }),
+              signal: controller.signal
             });
-            const data = await resp.json();
+            clearTimeout(timeoutId);
+            let data = {};
+            try { data = await resp.json(); } catch (e) { data = {}; }
             if (!resp.ok) {
               stopHoveringAndSet(1);
               alert(data.error || 'Failed to grade wallet');
