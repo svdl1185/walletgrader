@@ -587,14 +587,14 @@ def grade_wallet(address: str) -> Dict[str, Any]:
     pct_pts = 3 * roi_200 + 4 * roi_100 + 1 * roi_50
     score += min(20, pct_pts)
 
-    # Big absolute win bonus (0-10)
-    if best_trade_profit_sol >= 5:
+    # Big absolute win bonus (0-10) — require larger wins
+    if best_trade_profit_sol >= 10:
         score += 10
-    elif best_trade_profit_sol >= 2:
+    elif best_trade_profit_sol >= 5:
         score += 7
-    elif best_trade_profit_sol >= 1:
+    elif best_trade_profit_sol >= 2:
         score += 5
-    elif best_trade_profit_sol >= 0.5:
+    elif best_trade_profit_sol >= 1:
         score += 3
 
     # Loss magnitude penalty (up to -25), scaled to avoid collapsing everyone into 1–10
@@ -655,15 +655,15 @@ def grade_wallet(address: str) -> Dict[str, Any]:
 
     # Add capped bonus points for wallet size, age, and activity
     bonus = 0
-    # Wallet size bonus (0–15)
+    # Wallet size bonus (0–5)
     if sol_balance >= 100:
-        bonus += 15
+        bonus += 5
     elif sol_balance >= 20:
-        bonus += 10
-    elif sol_balance >= 5:
-        bonus += 6
-    elif sol_balance >= 1:
         bonus += 3
+    elif sol_balance >= 5:
+        bonus += 2
+    elif sol_balance >= 1:
+        bonus += 1
     # Account age bonus (0–10)
     if days_old >= 540:
         bonus += 10
