@@ -37,7 +37,9 @@
             <div class="bar-marker" aria-hidden="true"></div>
           </div>
         </div>
-        
+        <div class="share-row" id="share-row" style="display:none; text-align:center; margin-top:10px;">
+          <button type="button" id="share-btn">Share on Twitter</button>
+        </div>
       </section>
 
       <div class="foot-link"><a href="https://github.com/svdl1185/walletgrader" target="_blank" rel="noopener noreferrer">Github</a></div>
@@ -50,7 +52,8 @@
         const scoreLine = document.getElementById('score-line');
         const scoreValue = document.getElementById('score-value');
         const scoreName = document.getElementById('score-name');
-        
+        const shareRow = document.getElementById('share-row');
+        const shareBtn = document.getElementById('share-btn');
         if (!form || !results || !bar) return;
         const marker = bar.querySelector('.bar-marker');
         const fill = bar.querySelector('.bar-fill');
@@ -117,6 +120,16 @@
             scoreValue.textContent = String(data.score);
             scoreName.textContent = String(data.label);
             const m = data.metrics || {};
+            // Enable Twitter share
+            try {
+              const urlBase = 'https://twitter.com/intent/tweet';
+              const tweet = `I got a jeet score of ${data.score} (${data.label}) on Jeet Checker. Try yours: ${location.origin}`;
+              shareRow.style.display = 'block';
+              shareBtn.onclick = () => {
+                const url = urlBase + '?text=' + encodeURIComponent(tweet);
+                window.open(url, '_blank', 'noopener,noreferrer');
+              };
+            } catch (_) {}
           } catch (e) {
             stopHoveringAndSet(1);
             alert('Network error');
