@@ -26,9 +26,6 @@
       <section class="results" id="results" style="display:none;">
         <div class="score-line" id="score-line" style="display:none;">
           <div class="score-label"><span id="score-value"></span> — <span id="score-name"></span></div>
-          <div class="score-heuristics">
-            <span id="heur-hold"></span> • <span id="heur-activity"></span>
-          </div>
         </div>
         <div class="score-bar" id="score-bar" data-final-score="0">
           <div class="bar-header">
@@ -53,8 +50,7 @@
         const scoreLine = document.getElementById('score-line');
         const scoreValue = document.getElementById('score-value');
         const scoreName = document.getElementById('score-name');
-        const heurHold = document.getElementById('heur-hold');
-        const heurActivity = document.getElementById('heur-activity');
+        
         if (!form || !results || !bar) return;
         const marker = bar.querySelector('.bar-marker');
         const fill = bar.querySelector('.bar-fill');
@@ -121,8 +117,6 @@
             scoreValue.textContent = String(data.score);
             scoreName.textContent = String(data.label);
             const m = data.metrics || {};
-            heurHold.textContent = `Hold: ${m.hold_profile || 'n/a'}`;
-            heurActivity.textContent = `Activity: ${m.activity_profile || 'n/a'}`;
           } catch (e) {
             stopHoveringAndSet(1);
             alert('Network error');

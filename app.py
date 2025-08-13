@@ -651,7 +651,7 @@ def grade_wallet(address: str) -> Dict[str, Any]:
         # Event balance hint
         if positive_events > 0 or negative_events > 0:
             balance_ratio = (positive_events - negative_events) / float(max(1, positive_events + negative_events))
-            score += int(5 * max(-1.0, min(1.0, balance_ratio)))
+            score += int(2 * max(-1.0, min(1.0, balance_ratio)))
 
     # Add capped bonus points for wallet size, age, and activity
     bonus = 0
@@ -664,26 +664,26 @@ def grade_wallet(address: str) -> Dict[str, Any]:
         bonus += 2
     elif sol_balance >= 1:
         bonus += 1
-    # Account age bonus (0–10)
+    # Account age bonus (0–5)
     if days_old >= 540:
-        bonus += 10
+        bonus += 5
     elif days_old >= 365:
-        bonus += 8
-    elif days_old >= 180:
-        bonus += 5
-    elif days_old >= 90:
-        bonus += 3
-    elif days_old >= 30:
-        bonus += 2
-    # Activity bonus based on recent tx count window (0–5)
-    if tx_count >= 500:
-        bonus += 5
-    elif tx_count >= 200:
         bonus += 4
-    elif tx_count >= 100:
+    elif days_old >= 180:
         bonus += 3
-    elif tx_count >= 30:
+    elif days_old >= 90:
         bonus += 2
+    elif days_old >= 30:
+        bonus += 1
+    # Activity bonus based on recent tx count window (0–2)
+    if tx_count >= 500:
+        bonus += 2
+    elif tx_count >= 200:
+        bonus += 2
+    elif tx_count >= 100:
+        bonus += 1
+    elif tx_count >= 30:
+        bonus += 1
     score = max(1, min(100, int(round(score + bonus))))
 
     label = human_label_from_score(score)
