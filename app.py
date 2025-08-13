@@ -587,14 +587,14 @@ def grade_wallet(address: str) -> Dict[str, Any]:
     pct_pts = 3 * roi_200 + 4 * roi_100 + 1 * roi_50
     score += min(20, pct_pts)
 
-    # Big absolute win bonus (0-10) — require larger wins
-    if best_trade_profit_sol >= 10:
+    # Big absolute win bonus (0-10) — thresholds at 10/20/50/100+ SOL
+    if best_trade_profit_sol >= 100:
         score += 10
-    elif best_trade_profit_sol >= 5:
+    elif best_trade_profit_sol >= 50:
         score += 7
-    elif best_trade_profit_sol >= 2:
+    elif best_trade_profit_sol >= 20:
         score += 5
-    elif best_trade_profit_sol >= 1:
+    elif best_trade_profit_sol >= 10:
         score += 3
 
     # Loss magnitude penalty (up to -25), scaled to avoid collapsing everyone into 1–10
@@ -952,13 +952,13 @@ def _analyze_signatures_full(client: Client, public_key: Any, signatures_json: L
     pct_pts = 2 * roi_200 + 3 * roi_100 + 1 * roi_50
     score += min(15, pct_pts)
 
-    if best_trade_profit_sol >= 5:
+    if best_trade_profit_sol >= 100:
         score += 10
-    elif best_trade_profit_sol >= 2:
+    elif best_trade_profit_sol >= 50:
         score += 7
-    elif best_trade_profit_sol >= 1:
+    elif best_trade_profit_sol >= 20:
         score += 5
-    elif best_trade_profit_sol >= 0.5:
+    elif best_trade_profit_sol >= 10:
         score += 3
 
     loss_mag = abs(total_loss_sol)
