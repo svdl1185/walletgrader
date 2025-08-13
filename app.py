@@ -8,10 +8,6 @@ import re
 
 from flask import Flask, render_template, request, jsonify
 import logging
-import requests
-from bs4 import BeautifulSoup  # type: ignore
-from urllib.parse import unquote
-from email.utils import parsedate_to_datetime
 
 try:
     from solana.rpc.api import Client  # type: ignore
@@ -38,49 +34,7 @@ STABLE_MINTS: Set[str] = {
     "EPjFWdd5AuJnBfZQ64rW7v6k7hNE9F3iuQF3XzQk3tYE",  # USDC
     "Es9vMFrzaCQi3QjY6C9p8wG9ZsV5hHok6wJG8YcJ2n6q",  # USDT
 }
-
-# Dexscreener API base
-DEXSCREENER_SEARCH = "https://api.dexscreener.com/latest/dex/search?q="
-DEXSCREENER_TOKEN = "https://api.dexscreener.com/latest/dex/tokens/"
-BIRDEYE_HISTORY = "https://public-api.birdeye.so/defi/history_price"
-YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/"
-
-# Routing hints for well-known tickers to avoid mapping to random on-chain tokens
-YAHOO_STOCKS: Set[str] = {
-    "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "NVDA", "AMD", "INTC", "NFLX",
-}
-YAHOO_CRYPTO: Set[str] = {
-    "BTC", "ETH", "LINK", "SOL", "BNB", "XRP", "ADA", "DOGE", "LTC", "BCH", "AVAX",
-    "MATIC", "DOT", "ATOM", "OP", "ARB", "NEAR", "APT", "SUI", "SEI", "TIA",
-}
-
-# Map common asset/company names in plain text to symbols so we catch tweets
-# that say e.g. "nvidia" or "amd" without a $cashtag.
-KNOWN_NAME_TO_SYMBOL: Dict[str, str] = {
-    "nvidia": "NVDA",
-    "nvda": "NVDA",
-    "advanced micro devices": "AMD",
-    "amd": "AMD",
-    "bitcoin": "BTC",
-    "btc": "BTC",
-    "chainlink": "LINK",
-    "link": "LINK",
-}
-
-def _build_chart_url(symbol: str, info: Dict[str, Any] | None, yahoo_long: Dict[str, float] | None) -> str | None:
-    sym = (symbol or "").upper()
-    if info and info.get("pair_address") and info.get("chain"):
-        chain = str(info.get("chain")).lower()
-        pair = info.get("pair_address")
-        return f"https://dexscreener.com/{chain}/{pair}"
-    if sym in YAHOO_STOCKS:
-        return f"https://finance.yahoo.com/quote/{sym}"
-    if sym in YAHOO_CRYPTO:
-        return f"https://finance.yahoo.com/quote/{sym}-USD"
-    # Fallback search
-    if sym:
-        return f"https://dexscreener.com/search?q={requests.utils.quote(sym)}"
-    return None
+## Wallet-only build: removed external token/ticker helpers
 
 # Single-scan tuning knobs (set via env for your RPC tier)
 # Defaults tuned to stay under the frontend's 30s timeout; override via env for deeper scans
@@ -122,7 +76,7 @@ def human_label_from_score(score: int) -> str:
     if score >= 40:
         return "Degen"
     if score >= 30:
-        return "Skeptic"
+        return "Jew"
     if score >= 25:
         return "Tiktokker"
     if score >= 20:
@@ -137,23 +91,7 @@ def human_label_from_score(score: int) -> str:
         return "Vaishya"
     return "Shudra"
 
-
-def human_label_from_score_twitter(score: int) -> str:
-    if score >= 95:
-        return "Oracle"
-    if score >= 90:
-        return "Alpha Caller"
-    if score >= 80:
-        return "Trusted"
-    if score >= 70:
-        return "Generally Solid"
-    if score >= 60:
-        return "Mixed"
-    if score >= 50:
-        return "Unreliable"
-    if score >= 40:
-        return "Heavy Shiller"
-    return "Mega Shiller"
+## Twitter labels removed
 
 def grade_wallet(address: str) -> Dict[str, Any]:
     logger.info("grade_wallet:start address=%s", address)
@@ -715,7 +653,38 @@ def grade_wallet(address: str) -> Dict[str, Any]:
             balance_ratio = (positive_events - negative_events) / float(max(1, positive_events + negative_events))
             score += int(5 * max(-1.0, min(1.0, balance_ratio)))
 
-    score = max(1, min(100, int(round(score))))
+    # Add capped bonus points for wallet size, age, and activity
+    bonus = 0
+    # Wallet size bonus (0–15)
+    if sol_balance >= 100:
+        bonus += 15
+    elif sol_balance >= 20:
+        bonus += 10
+    elif sol_balance >= 5:
+        bonus += 6
+    elif sol_balance >= 1:
+        bonus += 3
+    # Account age bonus (0–10)
+    if days_old >= 540:
+        bonus += 10
+    elif days_old >= 365:
+        bonus += 8
+    elif days_old >= 180:
+        bonus += 5
+    elif days_old >= 90:
+        bonus += 3
+    elif days_old >= 30:
+        bonus += 2
+    # Activity bonus based on recent tx count window (0–5)
+    if tx_count >= 500:
+        bonus += 5
+    elif tx_count >= 200:
+        bonus += 4
+    elif tx_count >= 100:
+        bonus += 3
+    elif tx_count >= 30:
+        bonus += 2
+    score = max(1, min(100, int(round(score + bonus))))
 
     label = human_label_from_score(score)
 
@@ -1163,14 +1132,10 @@ def index():
     error: str | None = None
 
     if request.method == "POST":
-        # Legacy fallback: still render page if form posts without JS
-        raw = (request.form.get("handle", "") or request.form.get("address", "")).strip()
+        # SSR address-only grading
+        raw = (request.form.get("address", "")).strip()
         if not raw:
-            error = "Please enter a Twitter handle (e.g., @name)."
-        else:
-            # If the input looks like a twitter handle, route to twitter grading for SSR fallback
-            if raw.startswith("@") or ("twitter.com/" in raw) or ("x.com/" in raw):
-                result = grade_twitter(raw)
+            error = "Please enter a Solana wallet address."
             else:
                 result = grade_wallet(raw)
             error = result.get("error") if isinstance(result, dict) and result.get("error") else None
@@ -1191,811 +1156,44 @@ def grade_api():
     return jsonify(result), status
 
 
-# ---------------- Twitter reliability grading -----------------
-
-def _extract_handle(raw: str) -> str | None:
-    s = (raw or "").strip()
-    if not s:
-        return None
-    if s.startswith("@"):
-        s = s[1:]
-    # URLs
-    m = re.search(r"(?:https?://)?(?:www\.)?(?:x|twitter)\.com/([A-Za-z0-9_]{1,15})", s)
-    if m:
-        return m.group(1)
-    # Raw handle
-    m2 = re.match(r"^[A-Za-z0-9_]{1,15}$", s)
-    if m2:
-        return s
-    return None
+## Twitter grading removed
 
 
-def _extract_status_id(raw: str) -> str | None:
-    s = (raw or "").strip()
-    m = re.search(r"(?:https?://)?(?:www\.)?(?:x|twitter)\.com/[^/]+/status/(\d+)", s)
-    return m.group(1) if m else None
+##
 
 
-def _get_bearer_token() -> str | None:
-    """Return a normalized Twitter Bearer token.
-    Some dashboards show it URL-encoded; decode if needed.
-    """
-    token = os.environ.get("TWITTER_BEARER_TOKEN")
-    if not token:
-        return None
-    token = token.strip().strip('"').strip("'")
-    # Heuristic: if looks URL-encoded, decode once
-    if "%" in token or "+" in token:
-        try:
-            decoded = unquote(token)
-            # sanity: decoded should be longer or contain '/' characters
-            if decoded and ("/" in decoded or decoded.count('%') < token.count('%')):
-                token = decoded
-        except Exception:
-            pass
-    return token
+##
 
-def _twitter_fetch_from_nitter(handle: str, max_results: int = 50) -> List[Dict[str, Any]]:
-    instances = [
-        "https://nitter.net",
-        "https://nitter.poast.org",
-        "https://n.opnxng.com",
-        "https://nitter.privacydev.net",
-    ]
-    headers = {"User-Agent": "Mozilla/5.0"}
-    handle_path = (handle or "").lstrip("@")
-    for base in instances:
-        try:
-            url = f"{base}/{handle_path}"
-            resp = requests.get(url, headers=headers, timeout=10)
-            if not resp.ok or not resp.text:
-                continue
-            soup = BeautifulSoup(resp.text, "html.parser")
-            tweets: List[Dict[str, Any]] = []
-            # Each tweet link looks like /{handle}/status/{id} (case on handle varies). Match any status link.
-            for a in soup.select('a[href*="/status/"]'):
-                href = a.get('href') or ''
-                m = re.search(r"/status/(\d+)", href)
-                if not m:
-                    continue
-                tid = m.group(1)
-                # Fetch the tweet page to reliably get text + timestamp
-                item = _fetch_single_tweet(tid, handle_path)
-                if item:
-                    tweets.append(item)
-                if len(tweets) >= max_results:
-                    break
-            if tweets:
-                return tweets
-        except Exception:
-            continue
-    return []
+##
 
 
-TWEET_SCAN_LIMIT = int(os.environ.get("TWEET_SCAN_LIMIT", "2000"))
-TWEET_TIME_BUDGET_SEC = float(os.environ.get("TWEET_TIME_BUDGET_SEC", "20"))
+##
 
 
-def _twitter_fetch_recent(handle: str, max_results: int = 100) -> List[Dict[str, Any]]:
-    # Try Twitter API v2 if bearer provided
-    bearer = _get_bearer_token()
-    force_nitter = os.environ.get("FORCE_NITTER", "").lower() in ("1", "true", "yes")
-    if bearer and not force_nitter:
-        try:
-            # Lookup user id
-            r1 = requests.get(
-                f"https://api.twitter.com/2/users/by/username/{handle}",
-                headers={"Authorization": f"Bearer {bearer}"}, timeout=12,
-            )
-            if r1.ok:
-                uid = r1.json().get("data", {}).get("id")
-                if uid:
-                    r2 = requests.get(
-                        f"https://api.twitter.com/2/users/{uid}/tweets",
-                        params={
-                            "max_results": str(max_results),
-                            "exclude": "retweets",
-                            "tweet.fields": "created_at,entities",
-                        },
-                        headers={"Authorization": f"Bearer {bearer}"}, timeout=12,
-                    )
-                    if r2.ok:
-                        out: List[Dict[str, Any]] = []
-                        data = r2.json()
-                        out.extend({
-                            "id": t.get("id"),
-                            "text": t.get("text", ""),
-                            "created_at": t.get("created_at"),
-                            "entities": t.get("entities") or {},
-                        } for t in data.get("data", []) or [])
-                        # Paginate
-                        next_token = (data.get("meta") or {}).get("next_token")
-                        started = time.time()
-                        while next_token and len(out) < TWEET_SCAN_LIMIT and (time.time() - started) < TWEET_TIME_BUDGET_SEC:
-                            r3 = requests.get(
-                                f"https://api.twitter.com/2/users/{uid}/tweets",
-                                params={
-                                    "max_results": "100",
-                                    "exclude": "retweets",
-                                    "tweet.fields": "created_at,entities",
-                                    "pagination_token": next_token,
-                                },
-                                headers={"Authorization": f"Bearer {bearer}"}, timeout=12,
-                            )
-                            if not r3.ok:
-                                break
-                            jd = r3.json()
-                            out.extend({
-                                "id": t.get("id"),
-                                "text": t.get("text", ""),
-                                "created_at": t.get("created_at"),
-                                "entities": t.get("entities") or {},
-                            } for t in jd.get("data", []) or [])
-                            next_token = (jd.get("meta") or {}).get("next_token")
-                        return out[:TWEET_SCAN_LIMIT]
-        except Exception:
-            pass
-
-    # Fallback: parse Nitter HTML for ids, timestamps, and text
-    nitter = _twitter_fetch_from_nitter(handle, max_results=min(50, max_results))
-    if nitter:
-        return nitter
-    # Fallback 2: Nitter RSS
-    try:
-        import xml.etree.ElementTree as ET
-        for base in ("https://nitter.net", "https://nitter.poast.org", "https://n.opnxng.com", "https://nitter.privacydev.net"):
-            url = f"{base}/{handle}/rss"
-            resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-            if not resp.ok or not resp.text:
-                continue
-            root = ET.fromstring(resp.text)
-            items: List[Dict[str, Any]] = []
-            for it in root.findall('.//item'):
-                title_el = it.find('title'); link_el = it.find('link'); date_el = it.find('pubDate')
-                text = title_el.text if title_el is not None else ''
-                link = link_el.text if link_el is not None else ''
-                ts = date_el.text if date_el is not None else None
-                tid = None
-                if link:
-                    m = re.search(r"/status/(\d+)", link)
-                    if m: tid = m.group(1)
-                items.append({"id": tid, "text": text or '', "created_at": ts})
-                if len(items) >= max_results:
-                    break
-            if items:
-                return items
-    except Exception:
-        pass
-
-    # Fallback 3: text proxy (Jina AI) on x.com profile
-    try:
-        for scheme in ("http", "https"):
-            url = f"https://r.jina.ai/{scheme}://x.com/{handle}"
-            resp = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
-            if not resp.ok or not resp.text:
-                continue
-            txt = resp.text
-            # Split the big blob into pseudo-tweets by double newlines
-            chunks = [c.strip() for c in txt.split("\n\n") if c.strip()]
-            items: List[Dict[str, Any]] = []
-            for c in chunks[:max_results]:
-                items.append({"id": None, "text": c, "created_at": None})
-            if items:
-                return items
-    except Exception:
-        pass
-    return []
+##
 
 
-def _fetch_single_tweet(tweet_id: str, handle_hint: str | None = None) -> Dict[str, Any] | None:
-    # Primary: Twitter API v2
-    bearer = _get_bearer_token()
-    if bearer:
-        try:
-            r = requests.get(
-                f"https://api.twitter.com/2/tweets/{tweet_id}",
-                params={"tweet.fields": "created_at"},
-                headers={"Authorization": f"Bearer {bearer}"},
-                timeout=10,
-            )
-            if r.ok:
-                d = r.json().get("data", {})
-                if d and d.get("id"):
-                    return {"id": d.get("id"), "text": d.get("text", ""), "created_at": d.get("created_at")}
-        except Exception:
-            pass
-    # Fallback: Nitter HTML
-    instances = [
-        "https://nitter.net",
-        "https://nitter.poast.org",
-        "https://n.opnxng.com",
-        "https://nitter.privacydev.net",
-    ]
-    headers = {"User-Agent": "Mozilla/5.0"}
-    for base in instances:
-        for path in (f"/i/web/status/{tweet_id}", f"/{(handle_hint or '').lstrip('@')}/status/{tweet_id}"):
-            try:
-                url = base + path
-                resp = requests.get(url, headers=headers, timeout=10)
-                if not resp.ok or not resp.text:
-                    continue
-                soup = BeautifulSoup(resp.text, "html.parser")
-                time_tag = soup.find('time')
-                dt_iso = time_tag.get('datetime') if (time_tag and time_tag.has_attr('datetime')) else None
-                content = soup.select_one('.tweet-content, .status-content, .content')
-                text = content.get_text(" ", strip=True) if content else soup.get_text(" ", strip=True)[:400]
-                if text:
-                    return {"id": tweet_id, "text": text, "created_at": dt_iso}
-            except Exception:
-                continue
-    return None
+##
 
 
-def _extract_coin_mentions_per_tweet(tweets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    events: List[Dict[str, Any]] = []
-    for tw in tweets:
-        text = tw.get("text") or ""
-        ts = tw.get("created_at")
-        tid = tw.get("id")
-        entities = tw.get("entities") or {}
-        # Prefer structured cashtags when available
-        symbols = []
-        try:
-            for sym in (entities.get("cashtags") or []):
-                val = (sym.get("tag") or "").upper()
-                if val and val not in symbols and len(val) <= 15:
-                    symbols.append(val)
-            for h in (entities.get("hashtags") or []):
-                val = (h.get("tag") or "").upper()
-                if val and val not in symbols and len(val) <= 15:
-                    symbols.append(val)
-        except Exception:
-            pass
-        for sym in symbols:
-            events.append({
-                "kind": "symbol",
-                "id": sym,
-                "text": text,
-                "created_at": ts,
-                "tweet_id": tid,
-                "source": "entity",
-            })
-        # Cashtags symbols
-        for m in re.finditer(r"\$([A-Za-z][A-Za-z0-9]{1,15})\b", text):
-            sym = m.group(1).upper()
-            events.append({
-                "kind": "symbol",
-                "id": sym,
-                "text": text,
-                "created_at": ts,
-                "tweet_id": tid,
-                "source": "cashtag",
-            })
-        # Hashtags symbols (#TICKER)
-        for m in re.finditer(r"#([A-Za-z][A-Za-z0-9]{1,15})\b", text):
-            sym = m.group(1).upper()
-            events.append({
-                "kind": "symbol",
-                "id": sym,
-                "text": text,
-                "created_at": ts,
-                "tweet_id": tid,
-                "source": "hashtag",
-            })
-        # Solana base58 mints
-        for m in re.finditer(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b", text):
-            addr = m.group(0)
-            events.append({
-                "kind": "address",
-                "id": addr,
-                "text": text,
-                "created_at": ts,
-                "tweet_id": tid,
-                "source": "mint",
-            })
-        # pump.fun links
-        for m in re.finditer(r"pump\.fun/(?:token/)?([1-9A-HJ-NP-Za-km-z]{32,44})", text):
-            addr = m.group(1)
-            events.append({
-                "kind": "address",
-                "id": addr,
-                "text": text,
-                "created_at": ts,
-                "tweet_id": tid,
-                "source": "pumpfun",
-            })
-        # Dexscreener links: either token or pair address
-        for m in re.finditer(r"dexscreener\.com/(?:[a-z\-]+/)?(?:token/)?([1-9A-HJ-NP-Za-km-z]{32,44})", text, re.IGNORECASE):
-            ident = m.group(1)
-            events.append({
-                "kind": "pair",
-                "id": ident,
-                "text": text,
-                "created_at": ts,
-                "tweet_id": tid,
-                "source": "dexscreener",
-            })
-        # Birdeye token links
-        for m in re.finditer(r"birdeye\.so/(?:token|symbol)/([1-9A-HJ-NP-Za-km-z]{32,44})", text, re.IGNORECASE):
-            ident = m.group(1)
-            events.append({
-                "kind": "address",
-                "id": ident,
-                "text": text,
-                "created_at": ts,
-                "tweet_id": tid,
-                "source": "birdeye",
-            })
-        # Name-based mapping to tickers (e.g., "nvidia" -> NVDA)
-        txt_lower = text.lower()
-        for name, sym in KNOWN_NAME_TO_SYMBOL.items():
-            if name in txt_lower:
-                events.append({
-                    "kind": "symbol",
-                    "id": sym,
-                    "text": text,
-                    "created_at": ts,
-                    "tweet_id": tid,
-                    "source": "name-map",
-                })
-    return events
+##
 
 
-def _dexscreener_lookup(ident: str, kind: str) -> Dict[str, Any] | None:
-    try:
-        ident_upper = (ident or "").upper()
-        if kind == "address":
-            r = requests.get(DEXSCREENER_TOKEN + ident, timeout=10)
-        else:
-            r = requests.get(DEXSCREENER_SEARCH + requests.utils.quote(ident), timeout=10)
-        if not r.ok:
-            return None
-        data = r.json() if r.headers.get("content-type", "").startswith("application/json") else None
-        if not isinstance(data, dict):
-            return None
-        pairs = data.get("pairs") or data.get("pairsByDexId") or data.get("pairs")
-        if not pairs:
-            return None
-        # If looking up by symbol, require exact symbol match to avoid false matches (e.g., $AMD stock)
-        if kind != "address":
-            pairs_exact = []
-            for p in pairs:
-                sym = ((p.get("baseToken") or {}).get("symbol") or p.get("baseTokenSymbol") or "").upper()
-                if sym == ident_upper:
-                    pairs_exact.append(p)
-            if pairs_exact:
-                pairs = pairs_exact
-            else:
-                return None
-        # Prefer highest liquidity among remaining, regardless of chain (all chains allowed)
-        def _rank(p):
-            liq = float((p.get("liquidity", {}) or {}).get("usd") or p.get("liquidity") or 0)
-            return liq
-        best = max(pairs, key=_rank)
-        change = best.get("priceChange", {}) or {}
-        return {
-            "symbol": (best.get("baseToken", {}) or {}).get("symbol") or best.get("baseTokenSymbol") or ident,
-            "address": (best.get("baseToken", {}) or {}).get("address") or best.get("baseTokenAddress"),
-            "chain": best.get("chainId") or best.get("chainId"),
-            "change1h": float(change.get("h1") or 0),
-            "change6h": float(change.get("h6") or 0),
-            "change24h": float(change.get("h24") or 0),
-            "liquidity_usd": float((best.get("liquidity", {}) or {}).get("usd") or 0),
-            "pair_address": best.get("pairAddress") or best.get("pairAddress"),
-        }
-    except Exception:
-        return None
-def _hours_since(dt_iso_str: str | None) -> float | None:
-    if not dt_iso_str:
-        return None
-    try:
-        # Normalize: 2025-01-01T12:34:56.000Z
-        dt = datetime.fromisoformat(dt_iso_str.replace("Z", "+00:00"))
-        return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0)
-    except Exception:
-        # Try RFC822 (e.g., Nitter RSS pubDate)
-        try:
-            dt = parsedate_to_datetime(dt_iso_str)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0)
-        except Exception:
-            return None
+##
+##
 
 
-def _approx_return_since_call_using_dex(change: Dict[str, float], hours_since: float | None) -> float | None:
-    if hours_since is None:
-        return None
-    h1 = float(change.get("h1", 0) if isinstance(change, dict) else 0)
-    h6 = float(change.get("h6", 0) if isinstance(change, dict) else 0)
-    h24 = float(change.get("h24", 0) if isinstance(change, dict) else 0)
-    if hours_since <= 1.0:
-        return h1
-    if hours_since <= 6.0:
-        return h6
-    if hours_since <= 24.0:
-        return h24
-    # Longer-term requires external history; return 24h as best-effort
-    return h24
+##
 
 
-def _birdeye_history_returns(address: str, call_dt_iso: str) -> Dict[str, float] | None:
-    api_key = os.environ.get("BIRDEYE_API_KEY")
-    if not api_key or not address or not call_dt_iso:
-        return None
-    try:
-        call_ts = int(datetime.fromisoformat(call_dt_iso.replace("Z", "+00:00")).timestamp())
-    except Exception:
-        return None
-    horizons = {"1h": 3600, "24h": 86400, "7d": 7*86400, "30d": 30*86400}
-    try:
-        params = {
-            "address": address,
-            "time_from": str(call_ts - 3600),
-            "time_to": str(call_ts + 30*86400 + 3600),
-            "interval": "1h",
-        }
-        r = requests.get(BIRDEYE_HISTORY, params=params, headers={"X-API-KEY": api_key}, timeout=12)
-        if not r.ok:
-            return None
-        data = r.json()
-        prices = data.get("data", {}).get("items") or data.get("data", {}).get("price") or []
-        if not prices:
-            return None
-        def _nearest(ts_target: int):
-            nearest = None
-            best_dt = 10**12
-            for it in prices:
-                ts_i = int(it.get("unixTime") or it.get("time"))
-                dt = abs(ts_i - ts_target)
-                if dt < best_dt:
-                    best_dt = dt
-                    nearest = it
-            return nearest
-        base = _nearest(call_ts)
-        if not base:
-            return None
-        p0 = float(base.get("value") or base.get("price") or 0)
-        if p0 <= 0:
-            return None
-        result: Dict[str, float] = {}
-        for k, delta in horizons.items():
-            tgt = _nearest(call_ts + delta)
-            if tgt:
-                p1 = float(tgt.get("value") or tgt.get("price") or 0)
-                if p1 > 0:
-                    result[k] = (p1 / p0 - 1.0) * 100.0
-        return result if result else None
-    except Exception:
-        return None
-def _yahoo_history_returns(symbol: str, call_dt_iso: str) -> Dict[str, float] | None:
-    if not symbol or not call_dt_iso:
-        return None
-    try:
-        call_ts = int(datetime.fromisoformat(call_dt_iso.replace("Z", "+00:00")).timestamp())
-    except Exception:
-        return None
-    candidates = [symbol.upper(), f"{symbol.upper()}-USD"]
-    for sym in candidates:
-        try:
-            r = requests.get(
-                YAHOO_CHART + sym,
-                params={"range": "35d", "interval": "1h"}, timeout=10,
-            )
-            if not r.ok:
-                continue
-            data = r.json().get("chart", {}).get("result", [None])[0]
-            if not data:
-                continue
-            ts = data.get("timestamp") or []
-            closes = ((data.get("indicators", {}) or {}).get("quote", [{}])[0]).get("close") or []
-            if not ts or not closes or len(ts) != len(closes):
-                continue
-            # Build list of (timestamp, close)
-            series = [(int(t), float(c)) for t, c in zip(ts, closes) if c is not None]
-            if not series:
-                continue
-            def nearest(target: int):
-                best = None
-                best_dt = 10**12
-                for t, c in series:
-                    dt = abs(t - target)
-                    if dt < best_dt:
-                        best_dt = dt
-                        best = (t, c)
-                return best
-            base = nearest(call_ts)
-            if not base or base[1] <= 0:
-                continue
-            p0 = base[1]
-            horizons = {"1h": 3600, "24h": 86400, "7d": 7*86400, "30d": 30*86400}
-            out: Dict[str, float] = {}
-            for k, delta in horizons.items():
-                nxt = nearest(call_ts + delta)
-                if nxt and nxt[1] > 0:
-                    out[k] = (nxt[1] / p0 - 1.0) * 100.0
-            if out:
-                return out
-        except Exception:
-            continue
-    return None
+##
+##
 
 
-def grade_twitter(handle_or_url: str) -> Dict[str, Any]:
-    handle = _extract_handle(handle_or_url or "")
-    if not handle:
-        return {"error": "Please provide a valid @handle or Twitter URL."}
-    logger.info("grade_twitter:start handle=%s", handle)
-    tweets: List[Dict[str, Any]] = []
-    status_id = _extract_status_id(handle_or_url or "")
-    if status_id:
-        one = _fetch_single_tweet(status_id, handle)
-        if one:
-            tweets.append(one)
-    tweets.extend(_twitter_fetch_recent(handle))
-    # Deduplicate by id keeping the earliest occurrence (status first)
-    seen: Set[str] = set()
-    dedup: List[Dict[str, Any]] = []
-    for t in tweets:
-        tid = str(t.get("id") or "")
-        if tid and tid in seen:
-            continue
-        if tid:
-            seen.add(tid)
-        dedup.append(t)
-    tweets = dedup
-    events = _extract_coin_mentions_per_tweet(tweets)
-    # As a final fallback, extract uppercase tokens if entities missing
-    if not events:
-        for t in tweets:
-            text = (t.get("text") or "")
-            ts = t.get("created_at")
-            tid = t.get("id")
-            for m in re.finditer(r"\b([A-Z]{2,6})\b", text):
-                sym = m.group(1)
-                if sym in {"THE","AND","FOR","WITH","THIS","FROM","WHAT","WILL","HAVE","THAT","YOUR","JUST","LIKE"}:
-                    continue
-                events.append({
-                    "kind": "symbol",
-                    "id": sym,
-                    "text": text,
-                    "created_at": ts,
-                    "tweet_id": tid,
-                    "source": "uppercase",
-                })
-    # If still empty, try a second Nitter instance directly for robustness
-    if not events:
-        extra = _twitter_fetch_from_nitter(handle, max_results=50)
-        if extra:
-            events = _extract_coin_mentions_per_tweet(extra)
-    if not events:
-        return {
-            "handle": handle,
-            "score": 50,
-            "label": human_label_from_score_twitter(50),
-            "metrics": {
-                "message": "No coin mentions detected in recent tweets",
-                "unique_coins": 0,
-                "total_calls": 0,
-            },
-            "coins": [],
-        }
-
-    # Aggregate by ident, enrich, and keep per-call timestamps
-    calls_by_ident: Dict[str, List[Dict[str, Any]] ] = {}
-    for ev in events:
-        ident = ev["id"]
-        calls_by_ident.setdefault(ident, []).append(ev)
-
-    enriched: List[Dict[str, Any]] = []
-    for ident, evs in list(calls_by_ident.items())[:60]:
-        info = None
-        # Route well-known tickers first
-        if evs[0].get("kind") == "symbol":
-            up = ident.upper()
-            if up in YAHOO_STOCKS or up in YAHOO_CRYPTO:
-                info = None  # force Yahoo for these symbols
-            else:
-                info = _dexscreener_lookup(ident, "symbol")
-        else:
-            info = _dexscreener_lookup(ident, evs[0].get("kind", "symbol"))
-        # For symbols that aren't Solana tokens, also attempt Yahoo Finance series
-        yahoo_long = None
-        if (not info) and evs[0].get("kind") == "symbol":
-            # Try Yahoo only if the symbol looks like a stock/crypto ticker
-            for ev in evs[:2]:
-                if ev.get("created_at"):
-                    yahoo_long = _yahoo_history_returns(ident, ev.get("created_at"))
-                    if yahoo_long:
-                        break
-        if not info and not yahoo_long:
-            # Still include symbol with unknown performance so UI shows calls
-            per_call_min: List[Dict[str, Any]] = []
-            for ev in evs[:8]:
-                per_call_min.append({
-                    "created_at": ev.get("created_at"),
-                    "source": ev.get("source"),
-                    "tweet_id": ev.get("tweet_id"),
-                    "approx_since_call_pct": None,
-                    "longterm": None,
-                })
-            enriched.append({
-                "id": ident,
-                "kind": evs[0].get("kind", "symbol"),
-                "symbol": ident,
-                "address": None,
-                "liquidity_usd": None,
-                "change1h": None,
-                "change6h": None,
-                "change24h": None,
-                "calls": per_call_min,
-            })
-            continue
-        # Compute short-term approximations per call
-        per_call: List[Dict[str, Any]] = []
-        for ev in evs[:8]:  # cap calls per asset for perf
-            hs = _hours_since(ev.get("created_at"))
-            approx = None
-            longterm = None
-            if info:
-                approx = _approx_return_since_call_using_dex({
-                    "h1": info.get("change1h", 0),
-                    "h6": info.get("change6h", 0),
-                    "h24": info.get("change24h", 0),
-                }, hs)
-                longterm = _birdeye_history_returns(info.get("address"), ev.get("created_at")) if ev.get("created_at") else None
-            if yahoo_long and ev.get("created_at"):
-                # Prefer Yahoo long horizons for non-DEX assets
-                longterm = yahoo_long
-                # Use Yahoo to approximate since-call change when we have no DEX info
-                if hs is not None:
-                    if hs <= 1.2 and "1h" in yahoo_long:
-                        approx = yahoo_long.get("1h")
-                    elif hs <= 26 and "24h" in yahoo_long:
-                        approx = yahoo_long.get("24h")
-                    elif hs <= 7*24 and "7d" in yahoo_long:
-                        approx = yahoo_long.get("7d")
-                    elif "30d" in yahoo_long:
-                        approx = yahoo_long.get("30d")
-            per_call.append({
-                "created_at": ev.get("created_at"),
-                "source": ev.get("source"),
-                "tweet_id": ev.get("tweet_id"),
-                "approx_since_call_pct": approx,
-                "longterm": longterm,
-            })
-        chart_url = _build_chart_url(ident, info, yahoo_long)
-        enriched.append({
-            "id": ident,
-            "kind": evs[0].get("kind", "symbol"),
-            "symbol": (info or {}).get("symbol") or ident,
-            "address": (info or {}).get("address"),
-            "liquidity_usd": (info or {}).get("liquidity_usd"),
-            "change1h": (info or {}).get("change1h"),
-            "change6h": (info or {}).get("change6h"),
-            "change24h": (info or {}).get("change24h"),
-            "pair_address": (info or {}).get("pair_address"),
-            "chain": (info or {}).get("chain"),
-            "chart_url": chart_url,
-            "calls": per_call,
-        })
-
-    if not enriched:
-        return {
-            "handle": handle,
-            "score": 45,
-            "label": human_label_from_score_twitter(45),
-            "metrics": {
-                "message": "Mentions found but no Dexscreener data",
-                "unique_coins": len(calls_by_ident),
-                "total_calls": sum(len(v) for v in calls_by_ident.values()),
-            },
-            "coins": [],
-        }
-
-    total_calls = int(sum(len(c["calls"]) for c in enriched))
-    unique_coins = len(enriched)
-
-    # Compute composite performance score weighted by mentions and liquidity
-    perf_vals: List[float] = []
-    liq_low_calls = 0
-    pump_calls = 0
-    for c in enriched:
-        liq = float(c.get("liquidity_usd") or 0)
-        is_low_liq = liq < 30_000
-        for ev in c["calls"]:
-            if ev.get("source") == "pumpfun":
-                pump_calls += 1
-            if is_low_liq:
-                liq_low_calls += 1
-            approx = ev.get("approx_since_call_pct")
-            if isinstance(approx, (int, float)):
-                # Weight by liquidity bucket
-                w = 1.0 if liq >= 100_000 else (0.7 if liq >= 30_000 else 0.4)
-                perf_vals.append(w * float(approx))
-
-    # Start from high and subtract for over-shilling
-    score = 85
-    # Over-shilling penalties
-    if unique_coins > 3:
-        score -= min(35, int(2 * (unique_coins - 3)))
-    if total_calls > 25:
-        score -= min(20, int(0.8 * (total_calls - 25)))
-    # Illiquidity penalty
-    if total_calls > 0:
-        illiq_ratio = liq_low_calls / float(total_calls)
-        score -= int(min(20, 25 * illiq_ratio))
-    # Pump.fun penalty
-    if total_calls > 0:
-        pump_ratio = pump_calls / float(total_calls)
-        score -= int(min(15, 20 * pump_ratio))
-    # Performance impact (short-term)
-    if perf_vals:
-        mean_perf = sum(perf_vals) / len(perf_vals)
-        # Consistency bonus/penalty
-        import statistics as _stats
-        try:
-            stdev = _stats.pstdev(perf_vals)
-        except Exception:
-            stdev = 0.0
-        sharpe_like = mean_perf / max(1.0, stdev)
-        score += int(max(-25, min(25, mean_perf / 4)))  # scale
-        score += int(max(-10, min(10, sharpe_like * 5)))
-    # Clamp
-    score = max(1, min(100, int(round(score))))
-
-    label = human_label_from_score_twitter(score)
-
-    # Summaries
-    avg1h = sum(c.get("change1h", 0) or 0 for c in enriched) / max(1, unique_coins)
-    avg6h = sum(c.get("change6h", 0) or 0 for c in enriched) / max(1, unique_coins)
-    avg24h = sum(c.get("change24h", 0) or 0 for c in enriched) / max(1, unique_coins)
-    safe3 = lambda c: (
-        (c.get("change1h") or 0),
-        (c.get("change6h") or 0),
-        (c.get("change24h") or 0),
-    )
-    best = max(enriched, key=lambda c: max(*safe3(c)))
-    worst = min(enriched, key=lambda c: min(*safe3(c)))
-
-    # Hit rate within ~24h approximation
-    hits = [1 for c in enriched for ev in c["calls"] if isinstance(ev.get("approx_since_call_pct"), (int, float)) and ev.get("approx_since_call_pct", 0) >= 10.0]
-    hit_rate = (sum(hits) / max(1, len(perf_vals))) if perf_vals else 0.0
-
-    return {
-        "handle": handle,
-        "score": score,
-        "label": label,
-        "metrics": {
-            "unique_coins": unique_coins,
-            "total_calls": total_calls,
-            "avg_change_1h": round(avg1h, 2),
-            "avg_change_6h": round(avg6h, 2),
-            "avg_change_24h": round(avg24h, 2),
-            "hit_rate_approx_24h": round(hit_rate, 3),
-            "low_liq_calls": int(liq_low_calls),
-            "pumpfun_calls": int(pump_calls),
-            "calls_with_perf": int(len(perf_vals)),
-            "best_symbol": best.get("symbol"),
-            "best_change_max": round(max(best.get("change1h", 0), best.get("change6h", 0), best.get("change24h", 0)), 2),
-            "worst_symbol": worst.get("symbol"),
-            "worst_change_min": round(min(worst.get("change1h", 0), worst.get("change6h", 0), worst.get("change24h", 0)), 2),
-        },
-        "coins": enriched,
-    }
+##
 
 
-@app.post("/grade_twitter")
-def grade_twitter_api():
-    data = request.get_json(silent=True) or {}
-    handle = (data.get("handle") or request.form.get("handle") or "").strip()
-    if not handle:
-        return jsonify({"error": "Please enter a Twitter handle (e.g., @name)."}), 400
-    logger.info("grade_twitter_api:request handle=%s", handle)
-    result = grade_twitter(handle)
-    status = 200 if not result.get("error") else 400
-    logger.info("grade_twitter_api:response handle=%s status=%s", handle, status)
-    return jsonify(result), status
+##
 
 
 if __name__ == "__main__":

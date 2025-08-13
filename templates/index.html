@@ -10,13 +10,13 @@
     <main class="container">
       <header class="header">
         <h1>Jeet Checker</h1>
-        <p class="subtitle">Enter a Twitter @handle or profile link to get a reliability score.</p>
+        <p class="subtitle">Enter a Solana address to get its jeet score.</p>
       </header>
 
       <form method="post" class="form" id="grade-form">
         <div class="row">
-          <input type="text" id="handle" name="handle" placeholder="e.g. @basedcaller or https://x.com/user" value="" autofocus />
-          <button type="submit">Grade</button>
+          <input type="text" id="address" name="address" placeholder="e.g. 3C5...YourSolAddress" value="" autofocus />
+          <button type="submit">Check</button>
         </div>
         {% if error %}
         <div class="alert error">{{ error }}</div>
@@ -41,7 +41,7 @@
           </div>
         </div>
         <div class="score-meta" id="score-meta" style="display:none; text-align:center; color:#666; font-size:13px; margin-top:6px;"></div>
-        <div id="calls-list" style="display:none; margin-top:12px;"></div>
+        <div id="metrics-list" style="display:none; margin-top:12px;"></div>
       </section>
 
       <div class="foot-link"><a href="https://github.com/svdl1185/walletgrader" target="_blank" rel="noopener noreferrer">Github</a></div>
@@ -98,12 +98,11 @@
           setPosition(finalScore);
         }
 
-        // Quick scan only
-
+        // Address scan
         form.addEventListener('submit', async (e) => {
           e.preventDefault();
-          const handle = (document.getElementById('handle') || {}).value || '';
-          if (!handle.trim()) return;
+          const address = (document.getElementById('address') || {}).value || '';
+          if (!address.trim()) return;
           results.style.display = 'block';
           marker.classList.remove('settle');
           fill.classList.remove('settle');
@@ -112,8 +111,8 @@
           try {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 60000);
-            const endpoint = '/grade_twitter';
-            const payload = { handle };
+            const endpoint = '/grade';
+            const payload = { address };
             const resp = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: controller.signal });
             clearTimeout(timeoutId);
             let data = {};
@@ -123,43 +122,21 @@
             scoreLine.style.display = 'block';
             scoreValue.textContent = String(data.score);
             scoreName.textContent = String(data.label);
-            heurHold.textContent = `Unique coins: ${data.metrics.unique_coins}`;
-            heurActivity.textContent = `Total calls: ${data.metrics.total_calls}`;
-            scoreMeta.style.display = 'none';
-            scoreMeta.textContent = '';
+            const m = data.metrics || {};
+            heurHold.textContent = `Hold: ${m.hold_profile || 'n/a'}`;
+            heurActivity.textContent = `Activity: ${m.activity_profile || 'n/a'}`;
+            scoreMeta.style.display = 'block';
+            scoreMeta.textContent = `Balance: ${(m.sol_balance ?? 0).toFixed(4)} SOL · Age: ${m.account_age_days ?? 0} days · Tx: ${m.recent_tx_count ?? 0}`;
 
-            // Build calls list
-            const callsList = document.getElementById('calls-list');
-            if (Array.isArray(data.coins)) {
-              const items = [];
-              for (const c of data.coins) {
-                const sym = c.symbol || c.id;
-                const liq = c.liquidity_usd ? ` | Lq: $${Math.round(c.liquidity_usd).toLocaleString()}` : '';
-                const link = c.chart_url || '#';
-                const header = `<div style="font-weight:700; margin-top:8px;">${sym} <a href="${link}" target="_blank" rel="noopener noreferrer" style="color:#2b6cf0; text-decoration:none;">(chart)</a>${liq}</div>`;
-                const calls = Array.isArray(c.calls) ? c.calls : [];
-                const rows = calls.map(ev => {
-                  const when = ev.created_at ? new Date(ev.created_at).toLocaleString() : 'time unknown';
-                  const approx = typeof ev.approx_since_call_pct === 'number' ? `${ev.approx_since_call_pct.toFixed(1)}%` : 'n/a';
-                  const tw = ev.tweet_id ? ` | <a href="https://x.com/i/web/status/${ev.tweet_id}" target="_blank" rel="noopener noreferrer" style="color:#2b6cf0; text-decoration:none;">tweet</a>` : '';
-                  let lt = '';
-                  if (ev.longterm && typeof ev.longterm === 'object') {
-                    const h24 = ev.longterm['24h'];
-                    const d7 = ev.longterm['7d'];
-                    const d30 = ev.longterm['30d'];
-                    const parts = [];
-                    if (typeof h24 === 'number') parts.push(`24h ${h24.toFixed(1)}%`);
-                    if (typeof d7 === 'number') parts.push(`7d ${d7.toFixed(1)}%`);
-                    if (typeof d30 === 'number') parts.push(`30d ${d30.toFixed(1)}%`);
-                    lt = parts.length ? ` | ${parts.join(' · ')}` : '';
-                  }
-                  return `<div style="font-size:13px; color:#333;">- ${when} — ~since-call: ${approx}${tw}${lt}</div>`;
-                }).join('');
-                items.push(header + rows);
-              }
-              callsList.innerHTML = items.join('');
-              callsList.style.display = items.length ? 'block' : 'none';
-            }
+            // Build metrics list
+            const list = document.getElementById('metrics-list');
+            const rows = [
+              `Wins: ${m.wins ?? 0} · Losses: ${m.losses ?? 0} · Win rate: ${((m.win_rate ?? 0) * 100).toFixed(1)}%`,
+              `Net PnL: ${(m.net_profit_sol ?? 0).toFixed(4)} SOL (Profit: ${(m.total_profit_sol ?? 0).toFixed(4)} · Loss: ${(m.total_loss_sol ?? 0).toFixed(4)})`,
+              `Best trade: ${(m.best_trade_profit_sol ?? 0).toFixed(4)} SOL · Worst trade: ${(m.worst_trade_loss_sol ?? 0).toFixed(4)} SOL`,
+            ];
+            list.innerHTML = rows.map(r => `<div style="font-size:13px; color:#333;">- ${r}</div>`).join('');
+            list.style.display = 'block';
           } catch (e) {
             stopHoveringAndSet(1);
             alert('Network error');

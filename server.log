@@ -1,0 +1,4 @@
+  File "/Users/biba/Documents/Projects/wallet_grader/app.py", line 628
+    score += 6
+    ^^^^^
+IndentationError: expected an indented block after 'elif' statement on line 627
