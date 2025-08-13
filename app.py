@@ -1136,9 +1136,10 @@ def index():
         raw = (request.form.get("address", "")).strip()
         if not raw:
             error = "Please enter a Solana wallet address."
-            else:
-                result = grade_wallet(raw)
-            error = result.get("error") if isinstance(result, dict) and result.get("error") else None
+        else:
+            result = grade_wallet(raw)
+        if isinstance(result, dict) and result.get("error"):
+            error = str(result.get("error"))
 
     return render_template("index.html", result=result, error=error)
 
